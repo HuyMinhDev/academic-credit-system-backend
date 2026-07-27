@@ -1,0 +1,150 @@
+generator client {
+  provider = "prisma-client-js"
+  output   = "../generated/prisma"
+}
+
+datasource db {
+  provider = "mysql"
+  url      = env("DATABASE_URL")
+}
+
+model Bookings {
+  id               Int                    @id @default(autoincrement())
+  room_id          Int
+  user_id          Int
+  check_in         DateTime               @db.DateTime(0)
+  check_out        DateTime               @db.DateTime(0)
+  guest_quantity   Int?                   @default(1)
+  total_price      Decimal                @default(0.00) @db.Decimal(15, 2)
+  note             String?                @db.VarChar(1000)
+  status           Bookings_status        @default(PENDING)
+  confirmed_at     DateTime?              @db.DateTime(0)
+  cancelled_at     DateTime?              @db.DateTime(0)
+  cancel_reason    String?                @db.VarChar(500)
+  cancelled_by     Bookings_cancelled_by?
+  deleted_by       Int                    @default(0)
+  is_deleted       Boolean                @default(false)
+  deleted_at       DateTime?              @db.Timestamp(0)
+  created_at       DateTime               @default(now()) @db.Timestamp(0)
+  updated_at       DateTime               @default(now()) @db.Timestamp(0)
+  is_deleted_user  Boolean                @default(false)
+  is_deleted_admin Boolean                @default(false)
+  Rooms            Rooms                  @relation(fields: [room_id], references: [id], onDelete: NoAction, onUpdate: NoAction, map: "bookings_ibfk_1")
+  Users            Users                  @relation(fields: [user_id], references: [id], onDelete: NoAction, onUpdate: NoAction, map: "bookings_ibfk_2")
+
+  @@index([room_id], map: "room_id")
+  @@index([user_id], map: "user_id")
+}
+
+model Comments {
+  id           Int       @id @default(autoincrement())
+  room_id      Int
+  user_id      Int
+  comment_date DateTime  @db.DateTime(0)
+  content      String?   @db.VarChar(1000)
+  rating       Int?
+  deleted_by   Int       @default(0)
+  is_deleted   Boolean   @default(false)
+  deleted_at   DateTime? @db.Timestamp(0)
+  created_at   DateTime  @default(now()) @db.Timestamp(0)
+  updated_at   DateTime  @default(now()) @db.Timestamp(0)
+  Rooms        Rooms     @relation(fields: [room_id], references: [id], onDelete: NoAction, onUpdate: NoAction, map: "comments_ibfk_1")
+  Users        Users     @relation(fields: [user_id], references: [id], onDelete: NoAction, onUpdate: NoAction, map: "comments_ibfk_2")
+
+  @@index([room_id], map: "room_id")
+  @@index([user_id], map: "user_id")
+}
+
+model Favorites {
+  id         Int       @id @default(autoincrement())
+  user_id    Int
+  room_id    Int
+  deleted_by Int       @default(0)
+  is_deleted Boolean   @default(false)
+  deleted_at DateTime? @db.Timestamp(0)
+  created_at DateTime  @default(now()) @db.Timestamp(0)
+  updated_at DateTime  @default(now()) @db.Timestamp(0)
+  Users      Users     @relation(fields: [user_id], references: [id], onDelete: Cascade, onUpdate: NoAction, map: "favorites_ibfk_1")
+  Rooms      Rooms     @relation(fields: [room_id], references: [id], onDelete: Cascade, onUpdate: NoAction, map: "favorites_ibfk_2")
+
+  @@unique([user_id, room_id], map: "unique_user_room")
+  @@index([room_id], map: "favorites_ibfk_2")
+}
+
+model Locations {
+  id            Int       @id @default(autoincrement())
+  location_name String    @db.VarChar(255)
+  province      String?   @db.VarChar(255)
+  country       String?   @db.VarChar(255)
+  image         String?   @db.VarChar(500)
+  deleted_by    Int       @default(0)
+  is_deleted    Boolean   @default(false)
+  deleted_at    DateTime? @db.Timestamp(0)
+  created_at    DateTime  @default(now()) @db.Timestamp(0)
+  updated_at    DateTime  @default(now()) @db.Timestamp(0)
+  Rooms         Rooms[]
+}
+
+model Rooms {
+  id              Int         @id @default(autoincrement())
+  room_name       String      @db.VarChar(255)
+  guest_count     Int?
+  bedroom_count   Int?
+  bed_count       Int?
+  bathroom_count  Int?
+  description     String?     @db.VarChar(1000)
+  price           Int?
+  washing_machine Boolean?    @default(false)
+  iron            Boolean?    @default(false)
+  tv              Boolean?    @default(false)
+  air_conditioner Boolean?    @default(false)
+  wifi            Boolean?    @default(false)
+  kitchen         Boolean?    @default(false)
+  parking         Boolean?    @default(false)
+  pool            Boolean?    @default(false)
+  desk            Boolean?    @default(false)
+  image           String?     @db.VarChar(500)
+  location_id     Int?
+  deleted_by      Int         @default(0)
+  is_deleted      Boolean     @default(false)
+  deleted_at      DateTime?   @db.Timestamp(0)
+  created_at      DateTime    @default(now()) @db.Timestamp(0)
+  updated_at      DateTime    @default(now()) @db.Timestamp(0)
+  Bookings        Bookings[]
+  Comments        Comments[]
+  Favorites       Favorites[]
+  Locations       Locations?  @relation(fields: [location_id], references: [id], onDelete: NoAction, onUpdate: NoAction, map: "rooms_ibfk_1")
+
+  @@index([location_id], map: "location_id")
+}
+
+model Users {
+  id         Int         @id @default(autoincrement())
+  name       String      @db.VarChar(255)
+  email      String      @unique(map: "email") @db.VarChar(255)
+  password   String      @db.VarChar(255)
+  phone      String?     @db.VarChar(50)
+  birth_day  String?     @db.VarChar(50)
+  gender     String?     @db.VarChar(10)
+  role       String?     @db.VarChar(50)
+  avatar     String?     @db.VarChar(500)
+  deleted_by Int         @default(0)
+  is_deleted Boolean     @default(false)
+  deleted_at DateTime?   @db.Timestamp(0)
+  created_at DateTime    @default(now()) @db.Timestamp(0)
+  updated_at DateTime    @default(now()) @db.Timestamp(0)
+  Bookings   Bookings[]
+  Comments   Comments[]
+  Favorites  Favorites[]
+}
+
+enum Bookings_status {
+  PENDING
+  CONFIRMED
+  CANCELLED
+}
+
+enum Bookings_cancelled_by {
+  user
+  admin
+}
