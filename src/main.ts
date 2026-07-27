@@ -1,41 +1,38 @@
 import { NestFactory, Reflector } from '@nestjs/core';
 import { AppModule } from './app.module';
-import { PORT } from './common/constant/app.constant';
 import { Logger, ValidationPipe } from '@nestjs/common';
 import { DocumentBuilder, SwaggerModule } from '@nestjs/swagger';
 import { ProtectGuard } from './common/protect/protect.guard';
 
-let app: any;
+let cachedApp: any;
 
-async function bootstrap() {
-  app = await NestFactory.create(AppModule);
+async function createApp() {
+  const app = await NestFactory.create(AppModule, {
+    logger: ['error', 'warn', 'log'],
+  });
   const reflector = app.get(Reflector);
-  // Enable CORS
+
   app.enableCors({
-    origin: true, // Allow all origins in development
+    origin: true,
     methods: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'],
     allowedHeaders: ['Content-Type', 'Authorization'],
     credentials: true,
   });
 
-  //Global
   app.setGlobalPrefix('api');
-  //Chuyển type global validation
+
   app.useGlobalPipes(
     new ValidationPipe({
       transform: true,
       transformOptions: { enableImplicitConversion: true },
     }),
   );
-  // app.useGlobalInterceptors(new LoggingInterceptor());
-  // app.useGlobalInterceptors(new ResponseSuccesInterceptor(reflector));
-  app.useGlobalGuards(new ProtectGuard(reflector));
-  // app.useGlobalGuards(new PermissionGuard(reflector));
 
-  // Swagger
+  app.useGlobalGuards(new ProtectGuard(reflector));
+
   const config = new DocumentBuilder()
-    .setTitle('Aparment Bussiness')
-    .setDescription('The cats API description')
+    .setTitle('Academic Credit System')
+    .setDescription('API description')
     .setVersion('1.0')
     .addBearerAuth(
       {
@@ -48,30 +45,30 @@ async function bootstrap() {
       'access-token',
     )
     .build();
-  const documentFactory = () => SwaggerModule.createDocument(app, config);
-  SwaggerModule.setup('api-docs', app, documentFactory, {
-    swaggerOptions: { persistAuthorization: true }, //Giup luu lai token sau moi lan f5
+
+  const document = SwaggerModule.createDocument(app, config);
+  SwaggerModule.setup('api-docs', app, document, {
+    swaggerOptions: { persistAuthorization: true },
   });
 
-  const logger = new Logger('Bootstrap');
-  await app.listen(PORT ?? 3069, () => {
-    logger.log(`Server is running on http://localhost:${PORT}`);
-  });
+  await app.init();
   return app;
 }
 
-// Vercel serverless handler
-if (process.env.VERCEL) {
-  bootstrap().then(() => {
-    console.log('NestJS bootstrap done on Vercel');
+// Local dev
+if (process.env.NODE_ENV !== 'production' && !process.env.VERCEL) {
+  createApp().then(async (app) => {
+    const PORT = process.env.PORT ?? 3069;
+    await app.listen(PORT, () => {
+      Logger.log(`Server running on http://localhost:${PORT}`, 'Bootstrap');
+    });
   });
-} else {
-  bootstrap();
 }
 
+// Vercel serverless handler
 export default async (req: any, res: any) => {
-  if (!app) {
-    await bootstrap();
+  if (!cachedApp) {
+    cachedApp = await createApp();
   }
-  return app.getHttpAdapter().getInstance()(req, res);
+  return cachedApp.getHttpAdapter().getInstance()(req, res);
 };
