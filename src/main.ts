@@ -49,6 +49,14 @@ async function createApp() {
   const document = SwaggerModule.createDocument(app, config);
   SwaggerModule.setup('api-docs', app, document, {
     swaggerOptions: { persistAuthorization: true },
+    customSiteTitle: 'Academic Credit System API',
+    customJs: [
+      'https://cdn.jsdelivr.net/npm/swagger-ui-dist@5.10.5/swagger-ui-bundle.js',
+      'https://cdn.jsdelivr.net/npm/swagger-ui-dist@5.10.5/swagger-ui-standalone-preset.js',
+    ],
+    customCssUrl: [
+      'https://cdn.jsdelivr.net/npm/swagger-ui-dist@5.10.5/swagger-ui.css',
+    ],
   });
 
   await app.init();
