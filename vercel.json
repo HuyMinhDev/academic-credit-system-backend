@@ -11,9 +11,5 @@
       "src": "/(.*)",
       "dest": "src/main.ts"
     }
-  ],
-  "env": {
-    "DATABASE_URL": "@database_url",
-    "PORT": "@port"
-  }
+  ]
 }
