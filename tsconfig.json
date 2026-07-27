@@ -1,6 +1,5 @@
 {
   "compilerOptions": {
-    // "ignoreDeprecations": "6.0",
     "module": "commonjs",
     "declaration": true,
     "removeComments": true,
@@ -17,6 +16,10 @@
     "noImplicitAny": false,
     "strictBindCallApply": false,
     "forceConsistentCasingInFileNames": false,
-    "noFallthroughCasesInSwitch": false
-  }
+    "noFallthroughCasesInSwitch": false,
+    "paths": {
+      "src/*": ["src/*"]
+    }
+  },
+  "include": ["src/**/*"]
 }

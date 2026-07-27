@@ -56,7 +56,7 @@ export class UserService {
 
     const skip = (page - 1) * pageSize;
 
-    const where: Prisma.UsersWhereInput = {
+    const where: Prisma.usersWhereInput = {
       is_deleted: false,
     };
 

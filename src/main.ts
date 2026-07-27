@@ -5,8 +5,10 @@ import { Logger, ValidationPipe } from '@nestjs/common';
 import { DocumentBuilder, SwaggerModule } from '@nestjs/swagger';
 import { ProtectGuard } from './common/protect/protect.guard';
 
+let app: any;
+
 async function bootstrap() {
-  const app = await NestFactory.create(AppModule);
+  app = await NestFactory.create(AppModule);
   const reflector = app.get(Reflector);
   // Enable CORS
   app.enableCors({
@@ -55,5 +57,21 @@ async function bootstrap() {
   await app.listen(PORT ?? 3069, () => {
     logger.log(`Server is running on http://localhost:${PORT}`);
   });
+  return app;
 }
-bootstrap();
+
+// Vercel serverless handler
+if (process.env.VERCEL) {
+  bootstrap().then(() => {
+    console.log('NestJS bootstrap done on Vercel');
+  });
+} else {
+  bootstrap();
+}
+
+export default async (req: any, res: any) => {
+  if (!app) {
+    await bootstrap();
+  }
+  return app.getHttpAdapter().getInstance()(req, res);
+};

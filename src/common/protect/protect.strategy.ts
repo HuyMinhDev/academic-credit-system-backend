@@ -1,4 +1,4 @@
-import { Users } from 'generated/prisma';
+import { users } from 'generated/prisma';
 import { ExtractJwt, Strategy } from 'passport-jwt';
 import { PassportStrategy } from '@nestjs/passport';
 import { Injectable } from '@nestjs/common';
@@ -15,7 +15,7 @@ export class ProtectStrategy extends PassportStrategy(Strategy, 'protect') {
     });
   }
 
-  async validate({ userId }: { userId: Users['id'] }) {
+  async validate({ userId }: { userId: users['id'] }) {
     const user = await this.prisma.users.findUnique({
       where: {
         id: userId,

@@ -20,7 +20,6 @@ import {
   ApiQuery,
 } from '@nestjs/swagger';
 import { responseSuccess } from 'src/common/helpers/response.helper';
-import { QueryRoomDto } from '../room/dto/query-room.dto';
 import { Public } from 'src/common/decorators/public.decorator';
 import { QueryUserDto } from './dto/query-location.dto';
 

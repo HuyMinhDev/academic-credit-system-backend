@@ -9,11 +9,6 @@ import { TokenModule } from './modules/modules-system/token/token.module';
 import { UserModule } from './modules/modules-api/user/user.module';
 // import { CommentModule } from './modules/modules-api/comment/comment.module';
 import { FileModule } from './modules/modules-api/file/file.module';
-import { LocationModule } from './modules/modules-api/location/location.module';
-import { RoomModule } from './modules/modules-api/room/room.module';
-import { CommentModule } from './modules/modules-api/comment/comment.module';
-import { FavoriteModule } from './modules/modules-api/favorite/favorite.module';
-import { BookingModule } from './modules/modules-api/booking/booking.module';
 import { HealthModule } from './modules/modules-api/health/health.module';
 
 @Module({
@@ -21,15 +16,8 @@ import { HealthModule } from './modules/modules-api/health/health.module';
     PrismaModule,
     AuthModule,
     TokenModule,
-    // ImageModule,
     UserModule,
-    // CommentModule,
     FileModule,
-    LocationModule,
-    RoomModule,
-    CommentModule,
-    FavoriteModule,
-    BookingModule,
     HealthModule,
   ],
   controllers: [AppController],
