@@ -5,7 +5,7 @@ import {
   ACCESS_TOKEN_SECRET,
   REFRESH_TOKEN_EXPIRES_IN,
   REFRESH_TOKEN_SECRET,
-} from 'src/common/constant/app.constant';
+} from '../../../common/constant/app.constant';
 import { PassportStrategy } from '@nestjs/passport';
 import { ExtractJwt, Strategy } from 'passport-jwt';
 

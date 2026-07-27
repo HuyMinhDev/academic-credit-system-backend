@@ -4,7 +4,7 @@ import { BadRequestException, Injectable } from '@nestjs/common';
 
 import { LoginDto } from './dto/login.dto';
 import * as bcrypt from 'bcrypt';
-import { TokenService } from 'src/modules/modules-system/token/token.service';
+import { TokenService } from '../../modules-system/token/token.service';
 import { RegisterDto } from './dto/register.dto';
 // import { UpdateAuthDto } from './dto/update-auth.dto';
 @Injectable()

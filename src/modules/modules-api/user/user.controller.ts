@@ -19,8 +19,8 @@ import {
   ApiBearerAuth,
   ApiQuery,
 } from '@nestjs/swagger';
-import { responseSuccess } from 'src/common/helpers/response.helper';
-import { Public } from 'src/common/decorators/public.decorator';
+import { responseSuccess } from '../../../common/helpers/response.helper';
+import { Public } from '../../../common/decorators/public.decorator';
 import { QueryUserDto } from './dto/query-location.dto';
 
 @ApiTags('Users')

@@ -2,8 +2,8 @@ import { users } from '@prisma/client';
 import { ExtractJwt, Strategy } from 'passport-jwt';
 import { PassportStrategy } from '@nestjs/passport';
 import { Injectable } from '@nestjs/common';
-import { ACCESS_TOKEN_SECRET } from 'src/common/constant/app.constant';
-import { PrismaService } from 'src/modules/modules-system/prisma/prisma.service';
+import { ACCESS_TOKEN_SECRET } from '../constant/app.constant';
+import { PrismaService } from '../../modules/modules-system/prisma/prisma.service';
 
 @Injectable()
 export class ProtectStrategy extends PassportStrategy(Strategy, 'protect') {

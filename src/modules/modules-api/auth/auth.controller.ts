@@ -1,9 +1,9 @@
 import { Controller, Get, Post, Body, Param, Delete } from '@nestjs/common';
 import { AuthService } from './auth.service';
 import { LoginDto } from './dto/login.dto';
-import { responseSuccess } from 'src/common/helpers/response.helper';
+import { responseSuccess } from '../../../common/helpers/response.helper';
 import { RegisterDto } from './dto/register.dto';
-import { Public } from 'src/common/decorators/public.decorator';
+import { Public } from '../../../common/decorators/public.decorator';
 import { ApiOperation, ApiResponse } from '@nestjs/swagger';
 @Controller('auth')
 export class AuthController {
