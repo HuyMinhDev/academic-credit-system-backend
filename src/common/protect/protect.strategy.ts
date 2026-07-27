@@ -1,4 +1,4 @@
-import { users } from 'generated/prisma';
+import { users } from '@prisma/client';
 import { ExtractJwt, Strategy } from 'passport-jwt';
 import { PassportStrategy } from '@nestjs/passport';
 import { Injectable } from '@nestjs/common';

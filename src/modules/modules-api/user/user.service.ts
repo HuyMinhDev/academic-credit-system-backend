@@ -8,7 +8,7 @@ import { PrismaService } from 'src/modules/modules-system/prisma/prisma.service'
 import { CreateUserDto } from './dto/create-user.dto';
 import { UpdateUserDto } from './dto/update-user.dto';
 import { QueryUserDto } from './dto/query-location.dto';
-import { Prisma } from 'generated/prisma';
+import { Prisma } from '@prisma/client';
 import * as bcrypt from 'bcrypt';
 
 @Injectable()
