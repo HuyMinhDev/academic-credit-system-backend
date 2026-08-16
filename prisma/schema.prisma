@@ -8,30 +8,39 @@ datasource db {
 }
 
 model users {
-  id                                                       Int               @id @default(autoincrement())
-  name                                                     String            @db.VarChar(255)
-  email                                                    String            @unique @db.VarChar(255)
-  password                                                 String            @db.VarChar(255)
-  phone                                                    String?           @db.VarChar(50)
-  birth_day                                                DateTime?         @db.Date
-  gender                                                   String?           @db.VarChar(10)
-  role                                                     String            @default("student") @db.VarChar(50)
-  avatar                                                   String?           @db.VarChar(500)
-  wallet_address                                           String?           @db.VarChar(42)
-  deleted_by                                               Int               @default(0)
-  is_deleted                                               Boolean           @default(false)
-  deleted_at                                               DateTime?         @db.Timestamptz(6)
-  created_at                                               DateTime          @default(now()) @db.Timestamptz(6)
-  updated_at                                               DateTime          @default(now()) @db.Timestamptz(6)
-  certificates                                             certificates[]
-  organizations_organizations_admin_wallet_bound_byTousers organizations[]   @relation("organizations_admin_wallet_bound_byTousers")
-  organizations_organizations_created_byTousers            organizations[]   @relation("organizations_created_byTousers")
-  wallet_bindings_wallet_bindings_bound_byTousers          wallet_bindings[] @relation("wallet_bindings_bound_byTousers")
-  wallet_bindings_wallet_bindings_unbound_byTousers        wallet_bindings[] @relation("wallet_bindings_unbound_byTousers")
-  wallet_bindings_wallet_bindings_user_idTousers           wallet_bindings[] @relation("wallet_bindings_user_idTousers")
+  id                                                              Int                  @id @default(autoincrement())
+  name                                                            String               @db.VarChar(255)
+  email                                                           String               @unique @db.VarChar(255)
+  password                                                        String               @db.VarChar(255)
+  phone                                                           String?              @db.VarChar(50)
+  birth_day                                                       DateTime?            @db.Date
+  gender                                                          String?              @db.VarChar(10)
+  role                                                            String               @default("student") @db.VarChar(50)
+  organization_id                                                 Int?
+  avatar                                                          String?              @db.VarChar(500)
+  wallet_address                                                  String?              @db.VarChar(42)
+  deleted_by                                                      Int?
+  is_deleted                                                      Boolean              @default(false)
+  deleted_at                                                      DateTime?            @db.Timestamptz(6)
+  created_at                                                      DateTime             @default(now()) @db.Timestamptz(6)
+  updated_at                                                      DateTime             @default(now()) @db.Timestamptz(6)
+  certificate_events                                              certificate_events[]
+  certificates_certificates_holder_user_id_organization_idTousers certificates[]       @relation("certificates_holder_user_id_organization_idTousers")
+  certificates_certificates_issuer_user_id_organization_idTousers certificates[]       @relation("certificates_issuer_user_id_organization_idTousers")
+  organizations_organizations_created_byTousers                   organizations[]      @relation("organizations_created_byTousers")
+  organizations_organizations_deleted_byTousers                   organizations[]      @relation("organizations_deleted_byTousers")
+  organizations_users_organization_idToorganizations              organizations?       @relation("users_organization_idToorganizations", fields: [organization_id], references: [id], onDelete: Restrict, onUpdate: NoAction, map: "fk_users_organization")
+  users                                                           users?               @relation("usersTousers", fields: [deleted_by], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  other_users                                                     users[]              @relation("usersTousers")
+  wallet_bindings_wallet_bindings_bound_byTousers                 wallet_bindings[]    @relation("wallet_bindings_bound_byTousers")
+  wallet_bindings_wallet_bindings_unbound_byTousers               wallet_bindings[]    @relation("wallet_bindings_unbound_byTousers")
+  wallet_bindings_wallet_bindings_user_idTousers                  wallet_bindings[]    @relation("wallet_bindings_user_idTousers")
 
+  @@unique([id, organization_id], map: "uniq_users_id_organization")
   @@index([is_deleted], map: "idx_users_is_deleted")
   @@index([role], map: "idx_users_role")
+  @@index([organization_id], map: "idx_users_organization")
+  @@index([organization_id, role], map: "idx_users_organization_role")
 }
 
 /// This table contains check constraints and requires additional setup for migrations. Visit https://pris.ly/d/check-constraints for more info.
@@ -43,9 +52,10 @@ model certificates {
   certificate_code_hash                                              String                @db.Char(66)
   document_hash                                                      String                @db.Char(66)
   certificate_code                                                   String                @db.VarChar(100)
-  holder_user_id                                                     Int?
+  holder_user_id                                                     Int
   holder_wallet_address                                              String                @db.VarChar(42)
   organization_id                                                    Int
+  issuer_user_id                                                     Int
   issuer_wallet_address                                              String                @db.VarChar(42)
   issued_at                                                          DateTime              @db.Timestamptz(6)
   expires_at                                                         DateTime?             @db.Timestamptz(6)
@@ -61,11 +71,12 @@ model certificates {
   updated_at                                                         DateTime              @default(now()) @db.Timestamptz(6)
   certificate_events                                                 certificate_events[]
   certificate_metadata                                               certificate_metadata?
-  users                                                              users?                @relation(fields: [holder_user_id], references: [id], onUpdate: NoAction)
   organizations                                                      organizations         @relation(fields: [organization_id], references: [id], onDelete: NoAction, onUpdate: NoAction)
-  certificates_certificates_previous_token_idTocertificates          certificates?         @relation("certificates_previous_token_idTocertificates", fields: [previous_token_id], references: [token_id], onDelete: NoAction, onUpdate: NoAction)
+  users_certificates_holder_user_id_organization_idTousers           users                 @relation("certificates_holder_user_id_organization_idTousers", fields: [holder_user_id, organization_id], references: [id, organization_id], onUpdate: NoAction, map: "fk_certificate_holder_same_organization")
+  users_certificates_issuer_user_id_organization_idTousers           users                 @relation("certificates_issuer_user_id_organization_idTousers", fields: [issuer_user_id, organization_id], references: [id, organization_id], onUpdate: NoAction, map: "fk_certificate_issuer_same_organization")
+  certificates_certificates_previous_token_idTocertificates          certificates?         @relation("certificates_previous_token_idTocertificates", fields: [previous_token_id], references: [token_id], onUpdate: NoAction, map: "fk_certificate_previous_token")
   other_certificates_certificates_previous_token_idTocertificates    certificates[]        @relation("certificates_previous_token_idTocertificates")
-  certificates_certificates_replacement_token_idTocertificates       certificates?         @relation("certificates_replacement_token_idTocertificates", fields: [replacement_token_id], references: [token_id], onDelete: NoAction, onUpdate: NoAction)
+  certificates_certificates_replacement_token_idTocertificates       certificates?         @relation("certificates_replacement_token_idTocertificates", fields: [replacement_token_id], references: [token_id], onUpdate: NoAction, map: "fk_certificate_replacement_token")
   other_certificates_certificates_replacement_token_idTocertificates certificates[]        @relation("certificates_replacement_token_idTocertificates")
 
   @@unique([chain_id, contract_address, certificate_code_hash], map: "uniq_code_hash_per_chain")
@@ -76,6 +87,7 @@ model certificates {
   @@index([issued_at(sort: Desc)], map: "idx_certs_issued_at")
   @@index([organization_id], map: "idx_certs_organization")
   @@index([status], map: "idx_certs_status")
+  @@index([issuer_user_id], map: "idx_certs_issuer_user")
 }
 
 /// This table contains check constraints and requires additional setup for migrations. Visit https://pris.ly/d/check-constraints for more info.
@@ -84,15 +96,17 @@ model certificate_events {
   certificate_id       Int?
   token_id             BigInt
   event_type           String        @db.VarChar(20)
-  tx_hash              String        @unique @db.Char(66)
+  tx_hash              String        @db.Char(66)
   block_number         BigInt
   block_timestamp      DateTime      @db.Timestamptz(6)
   log_index            Int
   chain_id             Int
   actor_wallet_address String        @db.VarChar(42)
+  actor_user_id        Int?
   payload              Json
   reason_hash          String?       @db.Char(66)
   indexed_at           DateTime      @default(now()) @db.Timestamptz(6)
+  users                users?        @relation(fields: [actor_user_id], references: [id], onDelete: NoAction, onUpdate: NoAction)
   certificates         certificates? @relation(fields: [certificate_id], references: [id], onUpdate: NoAction)
 
   @@unique([chain_id, tx_hash, log_index], map: "uniq_event_per_tx")
@@ -101,6 +115,7 @@ model certificate_events {
   @@index([block_timestamp(sort: Desc)], map: "idx_events_timestamp")
   @@index([token_id], map: "idx_events_token_id")
   @@index([event_type], map: "idx_events_type")
+  @@index([actor_user_id], map: "idx_events_actor_user")
 }
 
 model certificate_metadata {
@@ -126,33 +141,32 @@ model certificate_metadata {
   @@index([graduation_year], map: "idx_metadata_graduation")
   @@index([holder_full_name], map: "idx_metadata_holder_name")
   @@index([program_name], map: "idx_metadata_program")
+  @@index([student_code], map: "idx_metadata_student_code")
 }
 
 /// This table contains check constraints and requires additional setup for migrations. Visit https://pris.ly/d/check-constraints for more info.
 model organizations {
-  id                                               Int            @id @default(autoincrement())
-  code                                             String         @unique @db.VarChar(50)
-  name                                             String         @db.VarChar(255)
-  address                                          String?
-  tax_code                                         String?        @db.VarChar(50)
-  representative_name                              String?        @db.VarChar(255)
-  representative_email                             String?        @db.VarChar(255)
-  representative_phone                             String?        @db.VarChar(50)
-  admin_wallet_address                             String         @unique @db.VarChar(42)
-  admin_wallet_bound_at                            DateTime?      @db.Timestamptz(6)
-  admin_wallet_bound_by                            Int?
-  is_active                                        Boolean        @default(true)
-  deleted_by                                       Int            @default(0)
-  deleted_at                                       DateTime?      @db.Timestamptz(6)
-  created_at                                       DateTime       @default(now()) @db.Timestamptz(6)
-  updated_at                                       DateTime       @default(now()) @db.Timestamptz(6)
-  created_by                                       Int?
-  certificates                                     certificates[]
-  users_organizations_admin_wallet_bound_byTousers users?         @relation("organizations_admin_wallet_bound_byTousers", fields: [admin_wallet_bound_by], references: [id], onDelete: NoAction, onUpdate: NoAction)
-  users_organizations_created_byTousers            users?         @relation("organizations_created_byTousers", fields: [created_by], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  id                                         Int            @id @default(autoincrement())
+  code                                       String         @unique @db.VarChar(50)
+  name                                       String         @db.VarChar(255)
+  address                                    String?
+  tax_code                                   String?        @db.VarChar(50)
+  representative_name                        String?        @db.VarChar(255)
+  representative_email                       String?        @db.VarChar(255)
+  representative_phone                       String?        @db.VarChar(50)
+  is_active                                  Boolean        @default(true)
+  deleted_by                                 Int?
+  deleted_at                                 DateTime?      @db.Timestamptz(6)
+  created_at                                 DateTime       @default(now()) @db.Timestamptz(6)
+  updated_at                                 DateTime       @default(now()) @db.Timestamptz(6)
+  created_by                                 Int
+  certificates                               certificates[]
+  users_organizations_created_byTousers      users          @relation("organizations_created_byTousers", fields: [created_by], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  users_organizations_deleted_byTousers      users?         @relation("organizations_deleted_byTousers", fields: [deleted_by], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  users_users_organization_idToorganizations users[]        @relation("users_organization_idToorganizations")
 
   @@index([is_active], map: "idx_organizations_active")
-  @@index([admin_wallet_address], map: "idx_organizations_admin_wallet")
+  @@index([created_by], map: "idx_organizations_created_by")
 }
 
 /// This table contains check constraints and requires additional setup for migrations. Visit https://pris.ly/d/check-constraints for more info.

@@ -7,8 +7,10 @@ import {
   Matches,
   MaxLength,
   MinLength,
+  ValidateNested,
 } from 'class-validator';
-import { Transform } from 'class-transformer';
+import { Transform, Type } from 'class-transformer';
+import { SchoolAdminAccountDto } from './school-admin-account.dto';
 
 export class CreateOrganizationDto {
   @ApiProperty({
@@ -83,22 +85,6 @@ export class CreateOrganizationDto {
   representative_phone?: string;
 
   @ApiProperty({
-    example: '0x742d35Cc6634C0532925a3b844Bc9e7595f0bEb0',
-    maxLength: 42,
-    description:
-      'Địa chỉ ví admin của tổ chức (0x + 40 hex, unique trong hệ thống).',
-  })
-  @IsString()
-  @MaxLength(42)
-  @Matches(/^0x[0-9a-fA-F]{40}$/, {
-    message: 'admin_wallet_address must be a valid EVM address (0x + 40 hex)',
-  })
-  @Transform(({ value }) =>
-    typeof value === 'string' ? value.trim().toLowerCase() : value,
-  )
-  admin_wallet_address: string;
-
-  @ApiProperty({
     example: true,
     required: false,
     default: true,
@@ -107,4 +93,13 @@ export class CreateOrganizationDto {
   @IsOptional()
   @IsBoolean()
   is_active?: boolean;
+
+  @ApiProperty({
+    type: () => SchoolAdminAccountDto,
+    description:
+      'Thông tin tài khoản school_admin sẽ được tạo kèm. School_admin thuộc về tổ chức này và dùng wallet_address làm admin wallet của tổ chức.',
+  })
+  @ValidateNested()
+  @Type(() => SchoolAdminAccountDto)
+  school_admin: SchoolAdminAccountDto;
 }

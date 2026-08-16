@@ -2,10 +2,12 @@ import { ApiProperty } from '@nestjs/swagger';
 import {
   IsEmail,
   IsEnum,
+  IsInt,
   IsOptional,
   IsString,
   Matches,
   MaxLength,
+  Min,
   MinLength,
 } from 'class-validator';
 import { Transform } from 'class-transformer';
@@ -69,13 +71,28 @@ export class CreateUserDto {
     enumName: 'UserRole',
     required: false,
     default: UserRole.STUDENT,
-    description: 'Một trong: super_admin, school_admin, issuer, student, verifier',
+    description:
+      'Một trong: super_admin, school_admin, issuer, student, verifier. ' +
+      'Mặc định = student. super_admin không được phép tạo qua API (chỉ seed). ' +
+      'Khi caller là school_admin, role sẽ bị ép về "student".',
   })
   @IsOptional()
   @IsEnum(UserRole, {
     message: `role must be one of: ${Object.values(UserRole).join(', ')}`,
   })
   role?: UserRole;
+
+  @ApiProperty({
+    example: 1,
+    required: false,
+    type: Number,
+    description:
+      'ID của tổ chức. Bắt buộc khi role != super_admin. Bị bỏ qua/bắt buộc override khi caller là school_admin.',
+  })
+  @IsOptional()
+  @IsInt()
+  @Min(1)
+  organization_id?: number;
 
   @ApiProperty({
     example: 'https://cdn.example.com/avatar.jpg',

@@ -1,5 +1,6 @@
 import {
   BadRequestException,
+  ForbiddenException,
   Injectable,
   InternalServerErrorException,
   NotFoundException,
@@ -10,7 +11,7 @@ import { UpdateUserDto } from './dto/update-user.dto';
 import { QueryUserDto } from './dto/query-location.dto';
 import { Prisma } from '@prisma/client';
 import * as bcrypt from 'bcrypt';
-import { DEFAULT_USER_ROLE, UserRole } from '../../../common/enums/user-role.enum';
+import { UserRole } from '../../../common/enums/user-role.enum';
 
 const SAFE_USER_SELECT = {
   id: true,
@@ -21,6 +22,7 @@ const SAFE_USER_SELECT = {
   gender: true,
   birth_day: true,
   avatar: true,
+  organization_id: true,
   wallet_address: true,
   created_at: true,
   updated_at: true,
@@ -30,14 +32,69 @@ const SAFE_USER_SELECT = {
 export class UserService {
   constructor(private readonly prisma: PrismaService) {}
 
-  // Create User
-  async create(createUserDto: CreateUserDto) {
-    const { email, password, role, birth_day, wallet_address, ...rest } =
+    async create(
+    createUserDto: CreateUserDto,
+    currentUser: {
+      id: number;
+      role: UserRole;
+      organization_id: number | null;
+    },
+  ) {
+    const { email, password, role, birth_day, wallet_address, organization_id, ...rest } =
       createUserDto;
 
-    const passwordHash = bcrypt.hashSync(password, 10);
+    const passwordHash = await bcrypt.hash(password, 10);
     const birthDayDate = this.normalizeBirthDay(birth_day);
     const walletAddress = this.normalizeWalletAddress(wallet_address);
+
+    let finalRole: UserRole;
+    let finalOrgId: number | null;
+
+    if (currentUser.role === UserRole.SUPER_ADMIN) {
+      finalRole = role ?? UserRole.STUDENT;
+
+      if (finalRole === UserRole.SUPER_ADMIN) {
+        throw new ForbiddenException(
+          'super_admin cannot be created via API; use seed/migration',
+        );
+      }
+
+      if (organization_id === undefined || organization_id === null) {
+        throw new BadRequestException(
+          `organization_id is required when role = ${finalRole}`,
+        );
+      }
+      finalOrgId = organization_id;
+    } else if (currentUser.role === UserRole.SCHOOL_ADMIN) {
+      if (!currentUser.organization_id) {
+        throw new ForbiddenException(
+          'school_admin has no organization assigned; cannot create users',
+        );
+      }
+      finalRole = UserRole.STUDENT;
+      finalOrgId = currentUser.organization_id;
+    } else {
+      throw new ForbiddenException(
+        'Only super_admin or school_admin can create users',
+      );
+    }
+
+    if (finalOrgId !== null) {
+      const org = await this.prisma.organizations.findUnique({
+        where: { id: finalOrgId },
+        select: { id: true, is_active: true },
+      });
+      if (!org) {
+        throw new BadRequestException(
+          `Organization with id ${finalOrgId} does not exist`,
+        );
+      }
+      if (!org.is_active) {
+        throw new BadRequestException(
+          `Organization with id ${finalOrgId} is not active`,
+        );
+      }
+    }
 
     if (walletAddress) {
       await this.assertWalletAddressAvailable(walletAddress);
@@ -49,7 +106,8 @@ export class UserService {
           ...rest,
           email,
           password: passwordHash,
-          role: role ?? DEFAULT_USER_ROLE,
+          role: finalRole,
+          organization_id: finalOrgId ?? null,
           birth_day: birthDayDate ?? undefined,
           wallet_address: walletAddress ?? undefined,
           created_at: new Date(),
@@ -60,6 +118,13 @@ export class UserService {
 
       return newUser;
     } catch (error) {
+      if (error instanceof BadRequestException) {
+        throw error;
+      }
+      if (error instanceof ForbiddenException) {
+        throw error;
+      }
+
       if (
         error instanceof Prisma.PrismaClientKnownRequestError &&
         error.code === 'P2002'
@@ -75,18 +140,63 @@ export class UserService {
         }
         throw new BadRequestException('Duplicate value for unique field');
       }
+
+      // Postgres CHECK constraint / NOT NULL / FK violation → 400 thay vì 500
+      if (error instanceof Prisma.PrismaClientUnknownRequestError) {
+        const msg = (error as { message?: string }).message ?? '';
+        const lower = msg.toLowerCase();
+        if (lower.includes('chk_users_role_organization')) {
+          throw new BadRequestException(
+            'role and organization_id are incompatible: ' +
+              'super_admin must have organization_id = NULL; ' +
+              'school_admin/student/issuer/verifier must have organization_id set.',
+          );
+        }
+        if (lower.includes('chk_users_wallet_format')) {
+          throw new BadRequestException('wallet_address format is invalid');
+        }
+        // Trích code SQLSTATE nếu có (e.g. 23502 = not_null_violation, 23514 = check_violation)
+        const sqlStateMatch = /code:\s*"(\d{5})"/.exec(msg);
+        if (sqlStateMatch) {
+          const sqlState = sqlStateMatch[1];
+          if (sqlState === '23502') {
+            throw new BadRequestException(
+              'Missing required field (NOT NULL violation): ' + msg.slice(0, 200),
+            );
+          }
+          if (sqlState === '23514') {
+            throw new BadRequestException(
+              'Constraint violation: ' + msg.slice(0, 200),
+            );
+          }
+          if (sqlState === '23503') {
+            throw new BadRequestException(
+              'Foreign key violation: ' + msg.slice(0, 200),
+            );
+          }
+        }
+      }
+
       if (error instanceof Prisma.PrismaClientValidationError) {
         throw new BadRequestException(
           `Invalid payload: ${error.message.split('\n').pop()?.trim() ?? 'validation failed'}`,
         );
       }
+
       console.error('Error creating user:', error);
       throw new InternalServerErrorException('Failed to create user');
     }
   }
 
   // Get All Users
-  async findAll(query: QueryUserDto) {
+  async findAll(
+    query: QueryUserDto,
+    currentUser: {
+      id: number;
+      role: UserRole;
+      organization_id: number | null;
+    },
+  ) {
     let { page, pageSize, keyword, role } = query;
     page = +page > 0 ? +page : 1;
     pageSize = +pageSize > 0 ? +pageSize : 10;
@@ -96,6 +206,20 @@ export class UserService {
     const where: Prisma.usersWhereInput = {
       is_deleted: false,
     };
+
+    if (currentUser.role === UserRole.SUPER_ADMIN) {
+    } else if (currentUser.role === UserRole.SCHOOL_ADMIN) {
+      if (!currentUser.organization_id) {
+        throw new ForbiddenException(
+          'school_admin has no organization assigned; cannot list users',
+        );
+      }
+      where.organization_id = currentUser.organization_id;
+    } else {
+      throw new ForbiddenException(
+        'Only super_admin or school_admin can list users',
+      );
+    }
 
     if (keyword && typeof keyword === 'string') {
       where.OR = [
@@ -238,6 +362,7 @@ export class UserService {
 
     return true;
   }
+
   private normalizeBirthDay(input: unknown): Date | null {
     if (input === null || input === undefined || input === '') {
       return null;

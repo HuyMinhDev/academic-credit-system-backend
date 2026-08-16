@@ -31,14 +31,21 @@ import { UserRole } from '../../../common/enums/user-role.enum';
 export class OrganizationController {
   constructor(private readonly organizationService: OrganizationService) {}
 
-  // Create Organization - super_admin only
   @Post()
   @Roles(UserRole.SUPER_ADMIN)
-  @ApiOperation({ summary: 'Create a new organization (super_admin only)' })
-  @ApiResponse({ status: 201, description: 'Organization created successfully' })
+  @ApiOperation({
+    summary:
+      'Create a new organization and its initial school_admin (super_admin only)',
+  })
+  @ApiResponse({
+    status: 201,
+    description:
+      'Organization + school_admin created successfully (transactional)',
+  })
   @ApiResponse({
     status: 400,
-    description: 'Invalid input or duplicate code/wallet/tax_code',
+    description:
+      'Invalid input or duplicate code/tax_code/school_admin.email/wallet',
   })
   @ApiResponse({ status: 403, description: 'Requires super_admin role' })
   async create(
@@ -46,10 +53,12 @@ export class OrganizationController {
     @Req() req: { user: { id: number } },
   ) {
     const result = await this.organizationService.create(dto, req.user.id);
-    return responseSuccess(result, 'Create organization successfully');
+    return responseSuccess(
+      result,
+      'Create organization and school_admin successfully',
+    );
   }
 
-  // List Organizations - filterable by isActive and search
   @Get()
   @ApiOperation({
     summary: 'Get list of organizations (pagination, search, isActive filter)',
@@ -73,7 +82,6 @@ export class OrganizationController {
     return this.organizationService.findAll(query);
   }
 
-  // Get Detail Organization
   @Get(':id')
   @ApiOperation({ summary: 'Get organization by ID' })
   @ApiParam({ name: 'id' })
@@ -83,7 +91,6 @@ export class OrganizationController {
     return responseSuccess(result, 'Get organization successfully');
   }
 
-  // Update Organization
   @Patch(':id')
   @ApiOperation({ summary: 'Update organization by ID' })
   @ApiResponse({ status: 404, description: 'Organization not found' })
@@ -92,7 +99,6 @@ export class OrganizationController {
     return responseSuccess(result, `Update organization #${id} successfully`);
   }
 
-  // Soft Delete Organization (set is_active = false)
   @Delete(':id')
   @ApiOperation({ summary: 'Soft delete organization (set is_active=false)' })
   @ApiResponse({ status: 404, description: 'Organization not found' })

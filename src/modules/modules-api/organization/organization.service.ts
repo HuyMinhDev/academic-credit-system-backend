@@ -5,10 +5,12 @@ import {
   NotFoundException,
 } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
+import * as bcrypt from 'bcrypt';
 import { PrismaService } from '../../modules-system/prisma/prisma.service';
 import { CreateOrganizationDto } from './dto/create-organization.dto';
 import { UpdateOrganizationDto } from './dto/update-organization.dto';
 import { QueryOrganizationDto } from './dto/query-organization.dto';
+import { UserRole } from '../../../common/enums/user-role.enum';
 
 const SAFE_ORG_SELECT = {
   id: true,
@@ -19,9 +21,6 @@ const SAFE_ORG_SELECT = {
   representative_name: true,
   representative_email: true,
   representative_phone: true,
-  admin_wallet_address: true,
-  admin_wallet_bound_at: true,
-  admin_wallet_bound_by: true,
   is_active: true,
   created_by: true,
   created_at: true,
@@ -33,34 +32,82 @@ export class OrganizationService {
   constructor(private readonly prisma: PrismaService) {}
 
   async create(dto: CreateOrganizationDto, currentUserId: number) {
-    const adminWallet = this.normalizeWalletAddress(dto.admin_wallet_address);
+    const adminWallet = this.normalizeWalletAddress(
+      dto.school_admin.wallet_address,
+    );
     if (!adminWallet) {
-      throw new BadRequestException('admin_wallet_address is invalid');
+      throw new BadRequestException('school_admin.wallet_address is invalid');
     }
 
+    const passwordHash = await bcrypt.hash(dto.school_admin.password, 10);
+
     try {
-      const organization = await this.prisma.organizations.create({
-        data: {
-          code: dto.code,
-          name: dto.name,
-          address: dto.address ?? null,
-          tax_code: dto.tax_code ?? null,
-          representative_name: dto.representative_name ?? null,
-          representative_email: dto.representative_email ?? null,
-          representative_phone: dto.representative_phone ?? null,
-          admin_wallet_address: adminWallet,
-          admin_wallet_bound_at: new Date(),
-          admin_wallet_bound_by: currentUserId,
-          is_active: true,
-          created_by: currentUserId,
-          created_at: new Date(),
-          updated_at: new Date(),
-        },
-        select: SAFE_ORG_SELECT,
+      const result = await this.prisma.$transaction(async (tx) => {
+        const existingEmail = await tx.users.findUnique({
+          where: { email: dto.school_admin.email },
+          select: { id: true },
+        });
+        if (existingEmail) {
+          throw new BadRequestException(
+            'school_admin.email already exists',
+          );
+        }
+
+        const existingWallet = await tx.users.findFirst({
+          where: { wallet_address: adminWallet },
+          select: { id: true },
+        });
+        if (existingWallet) {
+          throw new BadRequestException(
+            'school_admin.wallet_address already in use',
+          );
+        }
+
+        const organization = await tx.organizations.create({
+          data: {
+            code: dto.code,
+            name: dto.name,
+            address: dto.address ?? null,
+            tax_code: dto.tax_code ?? null,
+            representative_name: dto.representative_name ?? null,
+            representative_email: dto.representative_email ?? null,
+            representative_phone: dto.representative_phone ?? null,
+            is_active: dto.is_active ?? true,
+            created_by: currentUserId,
+          },
+          select: SAFE_ORG_SELECT,
+        });
+
+        const schoolAdmin = await tx.users.create({
+          data: {
+            name: dto.school_admin.name,
+            email: dto.school_admin.email,
+            password: passwordHash,
+            phone: dto.school_admin.phone ?? null,
+            role: UserRole.SCHOOL_ADMIN,
+            organization_id: organization.id,
+            wallet_address: adminWallet,
+          },
+          select: {
+            id: true,
+            name: true,
+            email: true,
+            phone: true,
+            role: true,
+            organization_id: true,
+            wallet_address: true,
+            created_at: true,
+          },
+        });
+
+        return { organization, school_admin: schoolAdmin };
       });
 
-      return organization;
+      return result;
     } catch (error) {
+      if (error instanceof BadRequestException) {
+        throw error;
+      }
       if (
         error instanceof Prisma.PrismaClientKnownRequestError &&
         error.code === 'P2002'
@@ -71,13 +118,16 @@ export class OrganizationService {
         if (targetFields.includes('code')) {
           throw new BadRequestException('Organization code already exists');
         }
-        if (targetFields.includes('admin_wallet_address')) {
-          throw new BadRequestException(
-            'admin_wallet_address already bound to another organization',
-          );
-        }
         if (targetFields.includes('tax_code')) {
           throw new BadRequestException('tax_code already exists');
+        }
+        if (targetFields.includes('email')) {
+          throw new BadRequestException('school_admin.email already exists');
+        }
+        if (targetFields.includes('wallet_address')) {
+          throw new BadRequestException(
+            'school_admin.wallet_address already in use',
+          );
         }
         throw new BadRequestException('Duplicate value for unique field');
       }
@@ -148,7 +198,7 @@ export class OrganizationService {
   async update(id: number, dto: UpdateOrganizationDto) {
     const existing = await this.prisma.organizations.findUnique({
       where: { id },
-      select: { id: true, admin_wallet_address: true },
+      select: { id: true },
     });
     if (!existing) {
       throw new NotFoundException(`Organization with id ${id} not found`);
@@ -173,18 +223,6 @@ export class OrganizationService {
     }
     if (dto.is_active !== undefined) dataToUpdate.is_active = dto.is_active;
 
-    if (dto.admin_wallet_address !== undefined) {
-      const normalized = this.normalizeWalletAddress(dto.admin_wallet_address);
-      if (!normalized) {
-        throw new BadRequestException('admin_wallet_address is invalid');
-      }
-      if (normalized !== existing.admin_wallet_address) {
-        await this.assertAdminWalletAvailable(normalized, id);
-        dataToUpdate.admin_wallet_address = normalized;
-        dataToUpdate.admin_wallet_bound_at = new Date();
-      }
-    }
-
     try {
       const updated = await this.prisma.organizations.update({
         where: { id },
@@ -203,10 +241,8 @@ export class OrganizationService {
         if (targetFields.includes('code')) {
           throw new BadRequestException('Organization code already exists');
         }
-        if (targetFields.includes('admin_wallet_address')) {
-          throw new BadRequestException(
-            'admin_wallet_address already bound to another organization',
-          );
+        if (targetFields.includes('tax_code')) {
+          throw new BadRequestException('tax_code already exists');
         }
         throw new BadRequestException('Duplicate value for unique field');
       }
@@ -242,20 +278,5 @@ export class OrganizationService {
     if (!trimmed) return null;
     if (!/^0x[0-9a-fA-F]{40}$/.test(trimmed)) return null;
     return trimmed.toLowerCase();
-  }
-
-  private async assertAdminWalletAvailable(
-    walletLower: string,
-    excludeOrgId?: number,
-  ): Promise<void> {
-    const existing = await this.prisma.organizations.findFirst({
-      where: { admin_wallet_address: walletLower },
-      select: { id: true },
-    });
-    if (existing && existing.id !== excludeOrgId) {
-      throw new BadRequestException(
-        'admin_wallet_address already bound to another organization',
-      );
-    }
   }
 }
