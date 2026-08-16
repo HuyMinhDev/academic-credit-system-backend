@@ -46,7 +46,7 @@ export class UserController {
   // Get All Users
   @Get()
   @ApiBearerAuth('access-token')
-  @ApiOperation({ summary: 'Get list of users (with pagination and search)' })
+  @ApiOperation({ summary: 'Get list of users (with pagination, search, role filter)' })
   @ApiQuery({ name: 'page', required: false, type: Number, example: 1 })
   @ApiQuery({ name: 'pageSize', required: false, type: Number, example: 10 })
   @ApiQuery({
@@ -54,6 +54,18 @@ export class UserController {
     required: false,
     type: String,
     description: 'Search by name, email, or phone',
+  })
+  @ApiQuery({
+    name: 'role',
+    required: false,
+    enum: [
+      'super_admin',
+      'school_admin',
+      'issuer',
+      'student',
+      'verifier',
+    ],
+    description: 'Lọc theo role',
   })
   @ApiResponse({
     status: 200,
