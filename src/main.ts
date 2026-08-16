@@ -3,6 +3,7 @@ import { AppModule } from './app.module';
 import { Logger, ValidationPipe } from '@nestjs/common';
 import { DocumentBuilder, SwaggerModule } from '@nestjs/swagger';
 import { ProtectGuard } from './common/protect/protect.guard';
+import { RolesGuard } from './common/protect/roles.guard';
 
 let cachedApp: any;
 
@@ -28,7 +29,7 @@ async function createApp() {
     }),
   );
 
-  app.useGlobalGuards(new ProtectGuard(reflector));
+  app.useGlobalGuards(new ProtectGuard(reflector), new RolesGuard(reflector));
 
   const config = new DocumentBuilder()
     .setTitle('Academic Credit System')
