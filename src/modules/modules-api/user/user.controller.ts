@@ -7,6 +7,7 @@ import {
   Param,
   Delete,
   Query,
+  Req,
 } from '@nestjs/common';
 import { UserService } from './user.service';
 import { CreateUserDto } from './dto/create-user.dto';
@@ -20,7 +21,8 @@ import {
   ApiQuery,
 } from '@nestjs/swagger';
 import { responseSuccess } from '../../../common/helpers/response.helper';
-import { Public } from '../../../common/decorators/public.decorator';
+import { Roles } from '../../../common/decorators/roles.decorator';
+import { UserRole } from '../../../common/enums/user-role.enum';
 import { QueryUserDto } from './dto/query-location.dto';
 
 @ApiTags('Users')
@@ -28,25 +30,43 @@ import { QueryUserDto } from './dto/query-location.dto';
 export class UserController {
   constructor(private readonly userService: UserService) {}
 
-  // Create User
-  @Public()
   @Post()
+  @Roles(UserRole.SUPER_ADMIN, UserRole.SCHOOL_ADMIN)
   @ApiBearerAuth('access-token')
-  @ApiOperation({ summary: 'Create a new user' })
+  @ApiOperation({
+    summary:
+      'Create a new user (super_admin or school_admin of the same organization)',
+  })
   @ApiResponse({ status: 201, description: 'User created successfully' })
   @ApiResponse({
     status: 400,
-    description: 'Invalid input or email already exists',
+    description:
+      'Invalid input, role/organization mismatch, duplicate email/wallet',
   })
-  async create(@Body() createUserDto: CreateUserDto) {
-    const result = await this.userService.create(createUserDto);
+  @ApiResponse({
+    status: 403,
+    description:
+      'Caller is not super_admin/school_admin; or school_admin trying to create outside own organization',
+  })
+  async create(
+    @Body() createUserDto: CreateUserDto,
+    @Req() req: {
+      user: {
+        id: number;
+        role: UserRole;
+        organization_id: number | null;
+      };
+    },
+  ) {
+    const result = await this.userService.create(createUserDto, req.user);
     return responseSuccess(result, 'Create user successfully');
   }
 
-  // Get All Users
   @Get()
   @ApiBearerAuth('access-token')
-  @ApiOperation({ summary: 'Get list of users (with pagination and search)' })
+  @ApiOperation({
+    summary: 'Get list of users (with pagination, search, role filter)',
+  })
   @ApiQuery({ name: 'page', required: false, type: Number, example: 1 })
   @ApiQuery({ name: 'pageSize', required: false, type: Number, example: 10 })
   @ApiQuery({
@@ -55,16 +75,36 @@ export class UserController {
     type: String,
     description: 'Search by name, email, or phone',
   })
+  @ApiQuery({
+    name: 'role',
+    required: false,
+    enum: [
+      'super_admin',
+      'school_admin',
+      'issuer',
+      'student',
+      'verifier',
+    ],
+    description: 'Lọc theo role',
+  })
   @ApiResponse({
     status: 200,
     description: 'List of users returned successfully',
   })
-  async findAll(@Query() query: QueryUserDto) {
-    const result = await this.userService.findAll(query);
+  async findAll(
+    @Query() query: QueryUserDto,
+    @Req() req: {
+      user: {
+        id: number;
+        role: UserRole;
+        organization_id: number | null;
+      };
+    },
+  ) {
+    const result = await this.userService.findAll(query, req.user);
     return result;
   }
 
-  // Get Detail User
   @Get(':id')
   @ApiBearerAuth('access-token')
   @ApiOperation({ summary: 'Get user by ID' })
@@ -75,7 +115,6 @@ export class UserController {
     return responseSuccess(result, 'Get user successfully');
   }
 
-  // Update User
   @Patch(':id')
   @ApiBearerAuth('access-token')
   @ApiOperation({ summary: 'Update user by ID' })
@@ -84,7 +123,6 @@ export class UserController {
     return responseSuccess(result, `Update user #${id} successfully`);
   }
 
-  // Delete User
   @Delete(':id')
   @ApiBearerAuth('access-token')
   @ApiOperation({ summary: 'Delete user by ID' })
