@@ -105,6 +105,44 @@ function mapBlockchainError(err: unknown): Error {
   return new BadGatewayException(`blockchain error: ${raw}`);
 }
 
+import { LookupCertificateDto } from './dto/lookup-certificate.dto';
+
+export interface LookupCertificateResult {
+  certificate_id: number;
+  token_id: string;
+  certificate_code: string;
+  certificate_code_hash: string;
+  document_hash: string;
+  holder_user_id: number;
+  holder_wallet_address: string;
+  organization_id: number;
+  issuer_user_id: number;
+  issuer_wallet_address: string;
+  issued_at: Date;
+  expires_at: Date | null;
+  status: string;
+  revoked_at: Date | null;
+  revocation_reason_hash: string | null;
+  metadata_uri: string;
+  on_chain_issued_at: string;
+  on_chain_expires_at: string;
+  on_chain_revoked_at: string;
+  on_chain_status: number;
+  tx_hash: string;
+  metadata?: {
+    holder_full_name: string;
+    student_code: string | null;
+    program_name: string;
+    major: string | null;
+    degree_type: string | null;
+    classification: string | null;
+    gpa: string | null;
+    graduation_year: number | null;
+    issue_decision_number: string | null;
+    issue_date: Date | null;
+  } | null;
+}
+
 @Injectable()
 export class CertificateService {
   private readonly logger = new Logger(CertificateService.name);
@@ -113,6 +151,106 @@ export class CertificateService {
     private readonly prisma: PrismaService,
     private readonly blockchain: BlockchainService,
   ) {}
+
+  async lookupByCode(dto: LookupCertificateDto): Promise<LookupCertificateResult> {
+    const codeHashHex = ethers.keccak256(ethers.toUtf8Bytes(dto.certificate_code));
+
+    const cert = await this.prisma.certificates.findFirst({
+      where: {
+        chain_id: CHAIN_ID,
+        contract_address: CERTIFICATE_MANAGER_ADDRESS,
+        certificate_code_hash: codeHashHex,
+      },
+      include: {
+        certificate_metadata: true,
+      },
+    });
+
+    if (!cert) {
+      throw new NotFoundException(
+        `Certificate with code '${dto.certificate_code}' not found`,
+      );
+    }
+
+    // Lấy tx_hash từ certificate_events thay vì query blockchain event
+    const issuedEvent = await this.prisma.certificate_events.findFirst({
+      where: {
+        certificate_id: cert.id,
+        event_type: 'Issued',
+      },
+      select: {
+        tx_hash: true,
+      },
+    });
+
+    let onChainCert: {
+      certificateCodeHash: string;
+      documentHash: string;
+      issuer: string;
+      issuedAt: bigint;
+      expiresAt: bigint;
+      revokedAt: bigint;
+      previousTokenId: bigint;
+      replacementTokenId: bigint;
+      status: number;
+      revocationReasonHash: string;
+    };
+
+    try {
+      onChainCert = await this.blockchain.managerContract.getCertificate(
+        BigInt(cert.token_id.toString()),
+      );
+    } catch (err) {
+      throw new ServiceUnavailableException(
+        `Could not fetch certificate from blockchain: ${(err as Error).message}`,
+      );
+    }
+
+    const result: LookupCertificateResult = {
+      certificate_id: cert.id,
+      token_id: cert.token_id.toString(),
+      certificate_code: cert.certificate_code,
+      certificate_code_hash: cert.certificate_code_hash,
+      document_hash: cert.document_hash,
+      holder_user_id: cert.holder_user_id,
+      holder_wallet_address: cert.holder_wallet_address,
+      organization_id: cert.organization_id,
+      issuer_user_id: cert.issuer_user_id,
+      issuer_wallet_address: cert.issuer_wallet_address,
+      issued_at: cert.issued_at,
+      expires_at: cert.expires_at,
+      status: this.mapStatus(cert.revoked_at, cert.expires_at),
+      revoked_at: cert.revoked_at,
+      revocation_reason_hash: cert.revocation_reason_hash ?? null,
+      metadata_uri: cert.metadata_uri,
+      on_chain_issued_at: onChainCert.issuedAt.toString(),
+      on_chain_expires_at: onChainCert.expiresAt.toString(),
+      on_chain_revoked_at: onChainCert.revokedAt.toString(),
+      on_chain_status: onChainCert.status,
+      tx_hash: issuedEvent?.tx_hash ?? '',
+      metadata: cert.certificate_metadata
+        ? {
+            holder_full_name: cert.certificate_metadata.holder_full_name,
+            student_code: cert.certificate_metadata.student_code,
+            program_name: cert.certificate_metadata.program_name,
+            major: cert.certificate_metadata.major,
+            degree_type: cert.certificate_metadata.degree_type,
+            classification: cert.certificate_metadata.classification,
+            gpa: cert.certificate_metadata.gpa?.toString() ?? null,
+            graduation_year: cert.certificate_metadata.graduation_year,
+            issue_decision_number: cert.certificate_metadata.issue_decision_number,
+            issue_date: cert.certificate_metadata.issue_date,
+          }
+        : null,
+    };
+    return result;
+  }
+
+  private mapStatus(revokedAt: Date | null, expiresAt: Date | null): string {
+    if (revokedAt) return 'REVOKED';
+    if (expiresAt && expiresAt < new Date()) return 'EXPIRED';
+    return 'ACTIVE';
+  }
 
   async issue(
     dto: IssueCertificateDto,
@@ -406,7 +544,7 @@ export class CertificateService {
         certificate_id: cert.id,
         token_id: cert.token_id.toString(),
         tx_hash: txResponse.hash,
-        block_number: safeReceipt.blockNumber,
+        block_number: Number(safeReceipt.blockNumber),
         block_timestamp: issuedAt,
         certificate_code: certCode,
         holder_user_id: holder.id,
