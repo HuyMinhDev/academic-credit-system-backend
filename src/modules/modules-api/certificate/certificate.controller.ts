@@ -14,6 +14,7 @@ import { Request } from 'express';
 import { CertificateService } from './certificate.service';
 import { IssueCertificateDto } from './dto/issue-certificate.dto';
 import { LookupCertificateDto } from './dto/lookup-certificate.dto';
+import { VerifyCertificateDto } from './dto/verify-certificate.dto';
 import { responseSuccess } from '../../../common/helpers/response.helper';
 import { Roles } from '../../../common/decorators/roles.decorator';
 import { RolesGuard } from '../../../common/protect/roles.guard';
@@ -38,6 +39,17 @@ export class CertificateController {
   async lookup(@Query() dto: LookupCertificateDto) {
     const result = await this.service.lookupByCode(dto);
     return responseSuccess(result, 'Certificate found');
+  }
+
+  @Post('verify')
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({
+    summary:
+      'Verify whether a certificate is still valid. Accepts either certificate_code or token_id. Compares DB against on-chain state.',
+  })
+  async verify(@Body() dto: VerifyCertificateDto) {
+    const result = await this.service.verify(dto);
+    return responseSuccess(result, 'Verification completed');
   }
 
   @Post()

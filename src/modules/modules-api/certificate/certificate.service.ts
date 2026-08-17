@@ -105,7 +105,19 @@ function mapBlockchainError(err: unknown): Error {
   return new BadGatewayException(`blockchain error: ${raw}`);
 }
 
+const STATUS_LABELS: Record<number, string> = {
+  0: 'Active',
+  1: 'Revoked',
+  2: 'Burned',
+  3: 'Replaced',
+};
+
+function statusLabel(raw: number): string {
+  return STATUS_LABELS[raw] ?? `Unknown(${raw})`;
+}
+
 import { LookupCertificateDto } from './dto/lookup-certificate.dto';
+import { VerifyCertificateDto } from './dto/verify-certificate.dto';
 
 export interface LookupCertificateResult {
   certificate_id: number;
@@ -143,6 +155,39 @@ export interface LookupCertificateResult {
   } | null;
 }
 
+export interface VerifyCertificateResult {
+  is_valid: boolean;
+  status:
+    | 'VALID'
+    | 'EXPIRED'
+    | 'REVOKED'
+    | 'NOT_FOUND'
+    | 'INVALID'
+    | 'DB_CHAIN_MISMATCH';
+  reason: string;
+  certificate_code: string;
+  token_id: string;
+  issued_at: Date;
+  expires_at: Date | null;
+  revoked_at: Date | null;
+  document_hash: string;
+  issuer_wallet_address: string;
+  holder_wallet_address: string;
+  metadata_uri: string;
+  on_chain: {
+    certificate_code_hash: string;
+    document_hash: string;
+    issuer: string;
+    issued_at: string;
+    expires_at: string;
+    revoked_at: string;
+    status: number;
+    status_label: string;
+  };
+  mismatches: string[];
+  verified_at: Date;
+}
+
 @Injectable()
 export class CertificateService {
   private readonly logger = new Logger(CertificateService.name);
@@ -151,6 +196,221 @@ export class CertificateService {
     private readonly prisma: PrismaService,
     private readonly blockchain: BlockchainService,
   ) {}
+
+  async verify(
+    dto: VerifyCertificateDto,
+  ): Promise<VerifyCertificateResult> {
+    const verifiedAt = new Date();
+
+    // --- 1. Resolve target cert in DB -------------------------------------
+    let cert: {
+      id: number;
+      token_id: bigint;
+      certificate_code: string;
+      certificate_code_hash: string;
+      document_hash: string;
+      holder_wallet_address: string;
+      issuer_wallet_address: string;
+      issued_at: Date;
+      expires_at: Date | null;
+      revoked_at: Date | null;
+      metadata_uri: string;
+    } | null = null;
+
+    if (dto.token_id) {
+      cert = await this.prisma.certificates.findFirst({
+        where: {
+          chain_id: CHAIN_ID,
+          contract_address: CERTIFICATE_MANAGER_ADDRESS,
+          token_id: BigInt(dto.token_id),
+        },
+        select: {
+          id: true,
+          token_id: true,
+          certificate_code: true,
+          certificate_code_hash: true,
+          document_hash: true,
+          holder_wallet_address: true,
+          issuer_wallet_address: true,
+          issued_at: true,
+          expires_at: true,
+          revoked_at: true,
+          metadata_uri: true,
+        },
+      });
+    } else if (dto.certificate_code) {
+      const codeHashHex = ethers.keccak256(
+        ethers.toUtf8Bytes(dto.certificate_code),
+      );
+      cert = await this.prisma.certificates.findFirst({
+        where: {
+          chain_id: CHAIN_ID,
+          contract_address: CERTIFICATE_MANAGER_ADDRESS,
+          certificate_code_hash: codeHashHex,
+        },
+        select: {
+          id: true,
+          token_id: true,
+          certificate_code: true,
+          certificate_code_hash: true,
+          document_hash: true,
+          holder_wallet_address: true,
+          issuer_wallet_address: true,
+          issued_at: true,
+          expires_at: true,
+          revoked_at: true,
+          metadata_uri: true,
+        },
+      });
+    }
+
+    if (!cert) {
+      return {
+        is_valid: false,
+        status: 'NOT_FOUND',
+        reason:
+          dto.certificate_code
+            ? `Certificate with code '${dto.certificate_code}' not found`
+            : `Certificate with token_id '${dto.token_id}' not found`,
+        certificate_code: dto.certificate_code ?? '',
+        token_id: dto.token_id ?? '',
+        issued_at: verifiedAt,
+        expires_at: null,
+        revoked_at: null,
+        document_hash: '',
+        issuer_wallet_address: '',
+        holder_wallet_address: '',
+        metadata_uri: '',
+        on_chain: {
+          certificate_code_hash: '',
+          document_hash: '',
+          issuer: '',
+          issued_at: '0',
+          expires_at: '0',
+          revoked_at: '0',
+          status: 0,
+          status_label: statusLabel(0),
+        },
+        mismatches: [],
+        verified_at: verifiedAt,
+      };
+    }
+
+    // --- 2. Fetch on-chain state -------------------------------------------
+    let onChain: {
+      certificateCodeHash: string;
+      documentHash: string;
+      issuer: string;
+      issuedAt: bigint;
+      expiresAt: bigint;
+      revokedAt: bigint;
+      previousTokenId: bigint;
+      replacementTokenId: bigint;
+      status: number;
+      revocationReasonHash: string;
+    };
+
+    try {
+      onChain = await this.blockchain.managerContract.getCertificate(
+        cert.token_id,
+      );
+    } catch (err) {
+      throw new ServiceUnavailableException(
+        `Could not fetch certificate from blockchain: ${(err as Error).message}`,
+      );
+    }
+
+    let isValidOnChain: boolean;
+    try {
+      isValidOnChain = await this.blockchain.managerContract.isValid(
+        cert.token_id,
+      );
+    } catch (err) {
+      throw new ServiceUnavailableException(
+        `Could not call isValid on blockchain: ${(err as Error).message}`,
+      );
+    }
+
+    // --- 3. DB <-> chain comparison ----------------------------------------
+    const mismatches: string[] = [];
+
+    const dbCodeHash = cert.certificate_code_hash.toLowerCase();
+    const chainCodeHash = onChain.certificateCodeHash.toLowerCase();
+    if (dbCodeHash !== chainCodeHash) {
+      mismatches.push('certificate_code_hash');
+    }
+
+    const dbDocHash = cert.document_hash.toLowerCase();
+    const chainDocHash = onChain.documentHash.toLowerCase();
+    if (dbDocHash !== chainDocHash) {
+      mismatches.push('document_hash');
+    }
+
+    const dbExpiresAtSec = cert.expires_at
+      ? Math.floor(cert.expires_at.getTime() / 1000)
+      : 0;
+    const chainExpiresAtSec = Number(onChain.expiresAt);
+    if (dbExpiresAtSec !== chainExpiresAtSec) {
+      mismatches.push('expires_at');
+    }
+
+    // --- 4. Determine status -----------------------------------------------
+    let status: VerifyCertificateResult['status'];
+    let isValid: boolean;
+    let reason: string;
+
+    if (cert.revoked_at !== null) {
+      status = 'REVOKED';
+      isValid = false;
+      reason = `Certificate was revoked at ${cert.revoked_at.toISOString()}`;
+    } else if (
+      cert.expires_at !== null &&
+      cert.expires_at.getTime() <= verifiedAt.getTime()
+    ) {
+      status = 'EXPIRED';
+      isValid = false;
+      reason = `Certificate expired at ${cert.expires_at.toISOString()}`;
+    } else if (mismatches.length > 0) {
+      status = 'DB_CHAIN_MISMATCH';
+      isValid = false;
+      reason = `DB and on-chain state differ on: ${mismatches.join(', ')}`;
+    } else if (!isValidOnChain) {
+      status = 'INVALID';
+      isValid = false;
+      reason = `Contract reports isValid(tokenId=${cert.token_id}) = false (on-chain status enum: ${statusLabel(onChain.status)})`;
+    } else {
+      status = 'VALID';
+      isValid = true;
+      reason = `Certificate is valid and on-chain state matches DB (on-chain status enum: ${statusLabel(onChain.status)})`;
+    }
+
+    return {
+      is_valid: isValid,
+      status,
+      reason,
+      certificate_code: cert.certificate_code,
+      token_id: cert.token_id.toString(),
+      issued_at: cert.issued_at,
+      expires_at: cert.expires_at,
+      revoked_at: cert.revoked_at,
+      document_hash: cert.document_hash,
+      issuer_wallet_address: cert.issuer_wallet_address,
+      holder_wallet_address: cert.holder_wallet_address,
+      metadata_uri: cert.metadata_uri,
+      on_chain: {
+        certificate_code_hash: onChain.certificateCodeHash,
+        document_hash: onChain.documentHash,
+        issuer: onChain.issuer,
+        issued_at: onChain.issuedAt.toString(),
+        expires_at: onChain.expiresAt.toString(),
+        revoked_at: onChain.revokedAt.toString(),
+        status: onChain.status,
+        status_label: statusLabel(onChain.status),
+      },
+      mismatches,
+      verified_at: verifiedAt,
+    };
+  }
 
   async lookupByCode(dto: LookupCertificateDto): Promise<LookupCertificateResult> {
     const codeHashHex = ethers.keccak256(ethers.toUtf8Bytes(dto.certificate_code));
