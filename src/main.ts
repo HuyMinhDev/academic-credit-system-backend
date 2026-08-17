@@ -5,6 +5,10 @@ import { DocumentBuilder, SwaggerModule } from '@nestjs/swagger';
 import { ProtectGuard } from './common/protect/protect.guard';
 import { RolesGuard } from './common/protect/roles.guard';
 
+(BigInt.prototype as any).toJSON = function () {
+  return this.toString();
+};
+
 let cachedApp: any;
 
 async function createApp() {

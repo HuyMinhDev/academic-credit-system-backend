@@ -1,0 +1,171 @@
+{
+  "abi": [
+    {
+      "type": "function",
+      "name": "ISSUER_ROLE",
+      "stateMutability": "view",
+      "inputs": [],
+      "outputs": [{ "name": "", "type": "bytes32" }]
+    },
+    {
+      "type": "function",
+      "name": "hasRole",
+      "stateMutability": "view",
+      "inputs": [
+        { "name": "role", "type": "bytes32" },
+        { "name": "account", "type": "address" }
+      ],
+      "outputs": [{ "name": "", "type": "bool" }]
+    },
+    {
+      "type": "function",
+      "name": "getRoleAdmin",
+      "stateMutability": "view",
+      "inputs": [{ "name": "role", "type": "bytes32" }],
+      "outputs": [{ "name": "", "type": "bytes32" }]
+    },
+    {
+      "type": "function",
+      "name": "supportsInterface",
+      "stateMutability": "view",
+      "inputs": [{ "name": "interfaceId", "type": "bytes4" }],
+      "outputs": [{ "name": "", "type": "bool" }]
+    },
+    {
+      "type": "function",
+      "name": "certificateToken",
+      "stateMutability": "view",
+      "inputs": [],
+      "outputs": [{ "name": "", "type": "address" }]
+    },
+    {
+      "type": "function",
+      "name": "certificateCodeUsed",
+      "stateMutability": "view",
+      "inputs": [{ "name": "", "type": "bytes32" }],
+      "outputs": [{ "name": "", "type": "bool" }]
+    },
+    {
+      "type": "function",
+      "name": "setIssuer",
+      "stateMutability": "nonpayable",
+      "inputs": [{ "name": "account", "type": "address" }],
+      "outputs": []
+    },
+    {
+      "type": "function",
+      "name": "issueCertificate",
+      "stateMutability": "nonpayable",
+      "inputs": [
+        { "name": "holder", "type": "address" },
+        { "name": "certificateCodeHash", "type": "bytes32" },
+        { "name": "documentHash", "type": "bytes32" },
+        { "name": "expiresAt", "type": "uint64" },
+        { "name": "metadataURI", "type": "string" }
+      ],
+      "outputs": [{ "name": "tokenId", "type": "uint256" }]
+    },
+    {
+      "type": "function",
+      "name": "revokeCertificate",
+      "stateMutability": "nonpayable",
+      "inputs": [
+        { "name": "tokenId", "type": "uint256" },
+        { "name": "reasonHash", "type": "bytes32" }
+      ],
+      "outputs": []
+    },
+    {
+      "type": "function",
+      "name": "renewCertificate",
+      "stateMutability": "nonpayable",
+      "inputs": [
+        { "name": "oldTokenId", "type": "uint256" },
+        { "name": "newCodeHash", "type": "bytes32" },
+        { "name": "newDocumentHash", "type": "bytes32" },
+        { "name": "newExpiresAt", "type": "uint64" },
+        { "name": "newMetadataURI", "type": "string" }
+      ],
+      "outputs": [{ "name": "newTokenId", "type": "uint256" }]
+    },
+    {
+      "type": "function",
+      "name": "getCertificate",
+      "stateMutability": "view",
+      "inputs": [{ "name": "tokenId", "type": "uint256" }],
+      "outputs": [
+        {
+          "name": "",
+          "type": "tuple",
+          "components": [
+            { "name": "certificateCodeHash", "type": "bytes32" },
+            { "name": "documentHash", "type": "bytes32" },
+            { "name": "issuer", "type": "address" },
+            { "name": "issuedAt", "type": "uint64" },
+            { "name": "expiresAt", "type": "uint64" },
+            { "name": "revokedAt", "type": "uint64" },
+            { "name": "previousTokenId", "type": "uint256" },
+            { "name": "replacementTokenId", "type": "uint256" },
+            {
+              "name": "status",
+              "type": "uint8",
+              "internalType": "enum CertificateManager.Status"
+            },
+            { "name": "revocationReasonHash", "type": "bytes32" }
+          ]
+        }
+      ]
+    },
+    {
+      "type": "function",
+      "name": "isValid",
+      "stateMutability": "view",
+      "inputs": [{ "name": "tokenId", "type": "uint256" }],
+      "outputs": [{ "name": "", "type": "bool" }]
+    },
+    {
+      "type": "event",
+      "name": "CertificateIssued",
+      "inputs": [
+        { "name": "tokenId", "type": "uint256", "indexed": true },
+        { "name": "holder", "type": "address", "indexed": true },
+        { "name": "issuer", "type": "address", "indexed": true },
+        { "name": "certificateCodeHash", "type": "bytes32", "indexed": false },
+        { "name": "documentHash", "type": "bytes32", "indexed": false },
+        { "name": "expiresAt", "type": "uint64", "indexed": false }
+      ],
+      "anonymous": false
+    },
+    {
+      "type": "event",
+      "name": "CertificateRevoked",
+      "inputs": [
+        { "name": "tokenId", "type": "uint256", "indexed": true },
+        { "name": "revokedBy", "type": "address", "indexed": false },
+        { "name": "reasonHash", "type": "bytes32", "indexed": false }
+      ],
+      "anonymous": false
+    },
+    {
+      "type": "event",
+      "name": "CertificateRenewed",
+      "inputs": [
+        { "name": "oldTokenId", "type": "uint256", "indexed": true },
+        { "name": "newTokenId", "type": "uint256", "indexed": true },
+        { "name": "holder", "type": "address", "indexed": true },
+        { "name": "renewedBy", "type": "address", "indexed": false }
+      ],
+      "anonymous": false
+    },
+    {
+      "type": "event",
+      "name": "RoleGranted",
+      "inputs": [
+        { "name": "role", "type": "bytes32", "indexed": true },
+        { "name": "account", "type": "address", "indexed": true },
+        { "name": "sender", "type": "address", "indexed": true }
+      ],
+      "anonymous": false
+    }
+  ]
+}

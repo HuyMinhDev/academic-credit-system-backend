@@ -17,6 +17,19 @@ export const CLOUDINARY_CLOUD_NAME = process.env.CLOUDINARY_CLOUD_NAME;
 export const CLOUDINARY_API_KEY = process.env.CLOUDINARY_API_KEY;
 export const CLOUDINARY_API_SECRET = process.env.CLOUDINARY_API_SECRET;
 
+// ---- Blockchain ----
+export const CHAIN_ID = Number(process.env.CHAIN_ID ?? 11155111);
+export const BLOCKCHAIN_RPC_URL = process.env.BLOCKCHAIN_RPC_URL;
+export const CERTIFICATE_MANAGER_ADDRESS =
+  process.env.CERTIFICATE_MANAGER_ADDRESS;
+export const CERTIFICATE_TOKEN_ADDRESS = process.env.CERTIFICATE_TOKEN_ADDRESS;
+export const ISSUER_ROLE = (process.env.ISSUER_ROLE ?? '').trim() as
+  | `0x${string}`
+  | '';
+export const ISSUER_PRIVATE_KEY = (process.env.ISSUER_PRIVATE_KEY ?? '').trim() as
+  | `0x${string}`
+  | '';
+
 console.log({
   DATABASE_URL,
   ACCESS_TOKEN_SECRET,
@@ -30,4 +43,10 @@ console.log({
   CLOUDINARY_API_KEY,
   CLOUDINARY_API_SECRET,
   PORT,
+  CHAIN_ID,
+  BLOCKCHAIN_RPC_URL,
+  CERTIFICATE_MANAGER_ADDRESS,
+  CERTIFICATE_TOKEN_ADDRESS,
+  ISSUER_ROLE_SET: Boolean(ISSUER_ROLE),
+  ISSUER_PRIVATE_KEY_SET: Boolean(ISSUER_PRIVATE_KEY),
 });

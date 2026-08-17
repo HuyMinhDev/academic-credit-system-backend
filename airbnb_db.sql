@@ -1,18 +1,3 @@
--- =========================================================
--- BLOCKCHAIN CREDIT SYSTEM - PostgreSQL schema
--- Business model:
---   super_admin  -> manages all organizations
---   school_admin -> belongs to one organization and manages that organization
---   student      -> belongs to one organization
---   school_admin -> may issue certificates only to students in the same organization
---
--- Notes:
--- - Authorization by role (e.g. only super_admin may create organizations,
---   only school_admin may issue certificates) should also be enforced in the backend.
--- - Database constraints below additionally guarantee that certificate holder/issuer
---   belong to the same organization as the certificate.
--- =========================================================
-
 
 -- =========================================================
 -- 1. users
@@ -564,3 +549,10 @@ SELECT setval(
 -- The composite foreign keys in certificates enforce the same-organization
 -- requirement at database level; role checks remain backend business rules.
 -- =========================================================
+
+
+UPDATE users
+SET organization_id = 2
+WHERE id = 4
+  AND role = 'student'
+  AND is_deleted = false;
