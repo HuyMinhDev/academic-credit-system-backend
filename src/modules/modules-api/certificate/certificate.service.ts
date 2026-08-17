@@ -1,0 +1,568 @@
+import {
+  BadGatewayException,
+  BadRequestException,
+  ConflictException,
+  ForbiddenException,
+  Injectable,
+  InternalServerErrorException,
+  Logger,
+  NotFoundException,
+  ServiceUnavailableException,
+} from '@nestjs/common';
+import { ethers } from 'ethers';
+import { Prisma } from '@prisma/client';
+import { PrismaService } from '../../modules-system/prisma/prisma.service';
+import { BlockchainService } from '../../modules-system/blockchain/blockchain.service';
+import {
+  CERTIFICATE_MANAGER_ADDRESS,
+  CHAIN_ID,
+  ISSUER_PRIVATE_KEY,
+  ISSUER_ROLE,
+} from '../../../common/constant/app.constant';
+import { UserRole } from '../../../common/enums/user-role.enum';
+
+import {
+  CertificateMetadataPayloadDto,
+  IssueCertificateDto,
+} from './dto/issue-certificate.dto';
+import { findCertificateIssuedEvent } from './helpers/event-parser';
+import {
+  extractIpfsCid,
+  normalizeAddress,
+  normalizeCertificateCode,
+  normalizeMetadataUri,
+  requireBytes32,
+} from './helpers/hash';
+
+const CONFIRMATIONS = 1;
+const GAS_BUFFER_BPS = 2000; // +20%
+
+interface SchoolAdminCaller {
+  id: number;
+  role: UserRole;
+  organization_id: number | null;
+  wallet_address: string | null;
+}
+
+export interface IssuedCertificateResult {
+  certificate_id: number;
+  token_id: string;
+  tx_hash: string;
+  block_number: number;
+  block_timestamp: Date;
+  certificate_code: string;
+  holder_user_id: number;
+  holder_wallet_address: string;
+  organization_id: number;
+  issuer_user_id: number;
+  issuer_wallet_address: string;
+  contract_address: string;
+  chain_id: number;
+  document_hash: string;
+  metadata_uri: string;
+  status: string;
+  issued_at: Date;
+  expires_at: Date | null;
+}
+
+/**
+ * Maps a smart-contract / ethers revert message to a friendlier HTTP error.
+ * Falls back to a generic BadGateway for unknown messages.
+ */
+function mapBlockchainError(err: unknown): Error {
+  const raw = err instanceof Error ? err.message : String(err);
+  const lower = raw.toLowerCase();
+
+  if (lower.includes('certificate_code already used') || lower.includes('code already used')) {
+    return new ConflictException('certificate_code already used on-chain');
+  }
+  if (lower.includes('invalid holder')) {
+    return new BadRequestException('invalid holder address on-chain');
+  }
+  if (lower.includes('invalid expiry') || lower.includes('invalid expiresat')) {
+    return new BadRequestException('invalid expires_at on-chain');
+  }
+  if (lower.includes('invalid document hash') || lower.includes('invalid documenthash')) {
+    return new BadRequestException('invalid document_hash on-chain');
+  }
+  if (lower.includes('invalid metadata uri') || lower.includes('invalid metadatauri')) {
+    return new BadRequestException('invalid metadata_uri on-chain');
+  }
+  if (lower.includes('accesscontrol') || lower.includes('missing role')) {
+    return new ForbiddenException(
+      'Issuer wallet is missing ISSUER_ROLE on CertificateManager',
+    );
+  }
+  if (lower.includes('insufficient funds')) {
+    return new BadGatewayException('issuer wallet has insufficient ETH for gas');
+  }
+  if (lower.includes('nonce')) {
+    return new BadGatewayException(`nonce error: ${raw}`);
+  }
+  if (lower.includes('revert')) {
+    return new BadGatewayException(`contract reverted: ${raw}`);
+  }
+  return new BadGatewayException(`blockchain error: ${raw}`);
+}
+
+@Injectable()
+export class CertificateService {
+  private readonly logger = new Logger(CertificateService.name);
+
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly blockchain: BlockchainService,
+  ) {}
+
+  async issue(
+    dto: IssueCertificateDto,
+    caller: SchoolAdminCaller,
+  ): Promise<IssuedCertificateResult> {
+    this.assertSchoolAdmin(caller);
+    this.assertIssuerKeyConfigured();
+    this.assertContractConfigured();
+
+    const organizationId = caller.organization_id;
+    if (organizationId === null) {
+      throw new ForbiddenException('school_admin has no organization assigned');
+    }
+
+    // --- 1. Validate inputs -------------------------------------------------
+    const certCode = normalizeCertificateCode(dto.certificate_code);
+    if (!certCode) {
+      throw new BadRequestException('certificate_code invalid (1..100 chars)');
+    }
+
+    const docHashHex = requireBytes32(dto.document_hash);
+    if (!docHashHex) {
+      throw new BadRequestException(
+        'document_hash must be 0x followed by exactly 64 hex chars',
+      );
+    }
+
+    const metadataUri = normalizeMetadataUri(dto.metadata_uri);
+    if (!metadataUri) {
+      throw new BadRequestException(
+        'metadata_uri must start with http(s)://, ipfs://, ar://, or data:',
+      );
+    }
+
+    let expiresAt = 0;
+    if (dto.expires_at) {
+      expiresAt = Math.floor(new Date(dto.expires_at).getTime() / 1000);
+      if (expiresAt <= Math.floor(Date.now() / 1000)) {
+        throw new BadRequestException(
+          'expires_at must be in the future',
+        );
+      }
+    }
+
+    const codeHashHex = ethers.keccak256(ethers.toUtf8Bytes(certCode));
+
+    // --- 2. Holder checks ---------------------------------------------------
+    const holder = await this.loadHolder(dto.holder_user_id);
+    // check nếu user cùng org với school_admin
+    this.assertSameOrganization(holder, organizationId);
+
+    // --- 3. Pre-flight on-chain uniqueness ----------------------------------
+    let usedOnChain: boolean;
+    try {
+      usedOnChain =
+        await this.blockchain.managerContract.certificateCodeUsed(codeHashHex);
+    } catch (err) {
+      throw new ServiceUnavailableException(
+        `Could not reach CertificateManager.certificateCodeUsed: ${(err as Error).message}`,
+      );
+    }
+    if (usedOnChain) {
+      throw new ConflictException('certificate_code already used on-chain');
+    }
+
+    // --- 4. Pre-flight DB uniqueness ----------------------------------------
+    const inDb = await this.prisma.certificates.findFirst({
+      where: {
+        chain_id: CHAIN_ID,
+        contract_address: CERTIFICATE_MANAGER_ADDRESS,
+        certificate_code_hash: codeHashHex,
+      },
+      select: { id: true },
+    });
+    if (inDb) {
+      throw new ConflictException('certificate_code already recorded in DB');
+    }
+
+    // --- 5. Issuer wallet from ISSUER_PRIVATE_KEY ---------------------------
+    const issuerAccount = new ethers.Wallet(ISSUER_PRIVATE_KEY, this.blockchain.provider);
+    const issuerWallet = normalizeAddress(issuerAccount.address);
+    if (!issuerWallet) {
+      throw new InternalServerErrorException(
+        'ISSUER_PRIVATE_KEY did not derive a valid address',
+      );
+    }
+
+    // Sanity check: env wallet must match caller's bound wallet if present.
+    const callerWallet = normalizeAddress(caller.wallet_address);
+    if (callerWallet && callerWallet.toLowerCase() !== issuerWallet.toLowerCase()) {
+      throw new ForbiddenException(
+        `ISSUER_PRIVATE_KEY wallet (${issuerWallet}) does not match caller's bound wallet (${callerWallet})`,
+      );
+    }
+
+    // --- 6. ISSUER_ROLE check ----------------------------------------------
+    await this.assertIssuerRole(issuerWallet);
+
+    // --- 7. Build EIP-1559 tx skeleton -------------------------------------
+    const iface = this.blockchain.managerContract.interface;
+    const data = iface.encodeFunctionData('issueCertificate', [
+      holder.wallet_address,
+      codeHashHex,
+      docHashHex,
+      expiresAt,
+      metadataUri,
+    ]);
+
+    const nonce = await this.blockchain.provider.getTransactionCount(
+      issuerWallet,
+      'pending',
+    );
+
+    let feeData: ethers.FeeData;
+    try {
+      feeData = await this.blockchain.provider.getFeeData();
+    } catch (err) {
+      throw new ServiceUnavailableException(
+        `Could not fetch fee data: ${(err as Error).message}`,
+      );
+    }
+
+    const maxPriorityFeePerGas =
+      feeData.maxPriorityFeePerGas ?? 1_500_000n; // 1.5 gwei fallback
+    const baseFee = feeData.maxFeePerGas ?? feeData.gasPrice ?? 30_000_000n;
+    const maxFeePerGas = baseFee + maxPriorityFeePerGas;
+
+    let estimatedGas: bigint;
+    try {
+      estimatedGas =
+        await this.blockchain.managerContract.issueCertificate.estimateGas(
+          holder.wallet_address,
+          codeHashHex,
+          docHashHex,
+          expiresAt,
+          metadataUri,
+          { from: issuerWallet },
+        );
+    } catch (err) {
+      throw mapBlockchainError(err);
+    }
+    const gasLimit = (estimatedGas * BigInt(10000 + GAS_BUFFER_BPS)) / 10000n;
+
+    const txRequest: ethers.TransactionRequest = {
+      to: CERTIFICATE_MANAGER_ADDRESS,
+      data,
+      value: 0n,
+      chainId: CHAIN_ID,
+      nonce,
+      gasLimit,
+      maxFeePerGas,
+      maxPriorityFeePerGas,
+      type: 2,
+    };
+
+    // --- 8. Sign + send ----------------------------------------------------
+    let txResponse: ethers.TransactionResponse;
+    try {
+      const signed = await issuerAccount.signTransaction(txRequest);
+      txResponse = await this.blockchain.provider.broadcastTransaction(
+        signed,
+      );
+    } catch (err) {
+      throw mapBlockchainError(err);
+    }
+
+    // --- 9. Wait for receipt ----------------------------------------------
+    let receipt: ethers.TransactionReceipt | null;
+    try {
+      receipt = await this.blockchain.provider.waitForTransaction(
+        txResponse.hash,
+        CONFIRMATIONS,
+        120_000,
+      );
+    } catch (err) {
+      throw new BadGatewayException(
+        `tx=${txResponse.hash} broadcast but confirmations failed: ${(err as Error).message}`,
+      );
+    }
+    if (!receipt) {
+      throw new BadGatewayException(
+        `tx=${txResponse.hash} broadcast but no receipt`,
+      );
+    }
+    if (receipt.status !== 1) {
+      throw new BadGatewayException(
+        `Blockchain transaction reverted (tx=${txResponse.hash})`,
+      );
+    }
+
+    // --- 10. Parse CertificateIssued ---------------------------------------
+    const issued = findCertificateIssuedEvent(receipt);
+    if (!issued) {
+      throw new InternalServerErrorException(
+        `CertificateIssued event not found in receipt logs of tx=${txResponse.hash}`,
+      );
+    }
+    if (issued.issuer.toLowerCase() !== issuerWallet.toLowerCase()) {
+      throw new InternalServerErrorException(
+        `Event issuer (${issued.issuer}) does not match signer (${issuerWallet})`,
+      );
+    }
+
+    // --- 11. Resolve block timestamp --------------------------------------
+    let block: ethers.Block | null;
+    try {
+      block = await this.blockchain.provider.getBlock(receipt.blockNumber);
+    } catch (err) {
+      throw new BadGatewayException(
+        `Cannot fetch block ${receipt.blockNumber} for tx=${txResponse.hash}: ${(err as Error).message}`,
+      );
+    }
+    if (!block) {
+      throw new BadGatewayException(
+        `Block ${receipt.blockNumber} not found for tx=${txResponse.hash}`,
+      );
+    }
+    const issuedAt = new Date(Number(block.timestamp) * 1000);
+    const expiresAtDate =
+      expiresAt === 0 ? null : new Date(expiresAt * 1000);
+
+    // --- 12. Persist (single DB transaction) ------------------------------
+    const ipfsCid = extractIpfsCid(metadataUri);
+
+    try {
+      const safeReceipt = receipt;
+      const cert = await this.prisma.$transaction(async (tx) => {
+        const created = await tx.certificates.create({
+          data: {
+            token_id: issued.tokenId,
+            chain_id: CHAIN_ID,
+            contract_address: CERTIFICATE_MANAGER_ADDRESS,
+            certificate_code_hash: issued.certificateCodeHash,
+            document_hash: issued.documentHash,
+            certificate_code: certCode,
+            holder_user_id: holder.id,
+            holder_wallet_address: issued.holder.toLowerCase(),
+            organization_id: organizationId,
+            issuer_user_id: caller.id,
+            issuer_wallet_address: issued.issuer.toLowerCase(),
+            issued_at: issuedAt,
+            expires_at: expiresAtDate,
+            status: 'Active',
+            metadata_uri: metadataUri,
+            metadata_ipfs_cid: ipfsCid,
+          },
+          select: {
+            id: true,
+            token_id: true,
+            status: true,
+          },
+        });
+
+        await tx.certificate_events.create({
+          data: {
+            certificate_id: created.id,
+            token_id: issued.tokenId,
+            event_type: 'Issued',
+            tx_hash: txResponse.hash,
+            block_number: safeReceipt.blockNumber,
+            block_timestamp: issuedAt,
+            log_index: issued.logIndex,
+            chain_id: CHAIN_ID,
+            actor_wallet_address: issued.issuer.toLowerCase(),
+            actor_user_id: caller.id,
+            payload: {
+              args: {
+                holder: issued.holder,
+                certificateCodeHash: issued.certificateCodeHash,
+                documentHash: issued.documentHash,
+                expiresAt: Number(issued.expiresAt),
+              },
+            } as Prisma.InputJsonValue,
+          },
+        });
+
+        if (dto.certificate_metadata) {
+          await tx.certificate_metadata.create({
+            data: {
+              certificate_id: created.id,
+              ...this.mapMetadata(dto.certificate_metadata),
+              metadata_ipfs_hash: ipfsCid ?? undefined,
+            },
+          });
+        }
+
+        return created;
+      });
+
+      return {
+        certificate_id: cert.id,
+        token_id: cert.token_id.toString(),
+        tx_hash: txResponse.hash,
+        block_number: safeReceipt.blockNumber,
+        block_timestamp: issuedAt,
+        certificate_code: certCode,
+        holder_user_id: holder.id,
+        holder_wallet_address: issued.holder.toLowerCase(),
+        organization_id: organizationId,
+        issuer_user_id: caller.id,
+        issuer_wallet_address: issued.issuer.toLowerCase(),
+        contract_address: CERTIFICATE_MANAGER_ADDRESS,
+        chain_id: CHAIN_ID,
+        document_hash: issued.documentHash,
+        metadata_uri: metadataUri,
+        status: cert.status,
+        issued_at: issuedAt,
+        expires_at: expiresAtDate,
+      };
+    } catch (err) {
+      // Chain tx succeeded, DB write failed. We cannot rollback the chain.
+      // Log clearly so the tx_hash is recoverable for manual reconciliation.
+      if (
+        err instanceof Prisma.PrismaClientKnownRequestError &&
+        err.code === 'P2002'
+      ) {
+        throw new ConflictException(
+          `certificate_code already recorded (race with another tx; chain tx=${txResponse.hash})`,
+        );
+      }
+      this.logger.error(
+        `DB write failed AFTER successful chain tx=${txResponse.hash} (tokenId=${issued.tokenId.toString()}): ${(err as Error).message}`,
+        (err as Error).stack,
+      );
+      throw new InternalServerErrorException(
+        `Persisted chain tx=${txResponse.hash} but DB write failed: ${(err as Error).message}. The chain tx is final; reconcile manually.`,
+      );
+    }
+  }
+
+  // ------------------------------------------------------------------
+  // helpers
+  // ------------------------------------------------------------------
+
+  private assertSchoolAdmin(caller: SchoolAdminCaller): void {
+    if (caller.role !== UserRole.SCHOOL_ADMIN) {
+      throw new ForbiddenException('Only school_admin can issue certificates');
+    }
+  }
+
+  private assertIssuerKeyConfigured(): void {
+    if (!ISSUER_PRIVATE_KEY) {
+      throw new InternalServerErrorException(
+        'ISSUER_PRIVATE_KEY is not set in environment',
+      );
+    }
+  }
+
+  private assertContractConfigured(): void {
+    if (!CERTIFICATE_MANAGER_ADDRESS) {
+      throw new InternalServerErrorException(
+        'CERTIFICATE_MANAGER_ADDRESS is not set in environment',
+      );
+    }
+  }
+
+  // tìm user từ DB, phải là STUDENT và đã bind wallet
+  private async loadHolder(holderUserId: number): Promise<{
+    id: number;
+    role: string;
+    organization_id: number | null;
+    wallet_address: string;
+  }> {
+    const u = await this.prisma.users.findUnique({
+      where: { id: holderUserId },
+      select: {
+        id: true,
+        role: true,
+        organization_id: true,
+        wallet_address: true,
+        is_deleted: true,
+      },
+    });
+    if (!u || u.is_deleted) {
+      throw new NotFoundException(`holder user ${holderUserId} not found`);
+    }
+    if (u.role !== UserRole.STUDENT) {
+      throw new BadRequestException(
+        `holder user ${holderUserId} is not a student (role=${u.role})`,
+      );
+    }
+    const wallet = normalizeAddress(u.wallet_address);
+    if (!wallet) {
+      throw new BadRequestException(
+        `holder user ${holderUserId} has no wallet_address bound`,
+      );
+    }
+    return {
+      id: u.id,
+      role: u.role,
+      organization_id: u.organization_id,
+      wallet_address: wallet,
+    };
+  }
+
+  private assertSameOrganization(
+    holder: { organization_id: number | null },
+    callerOrganizationId: number,
+  ): void {
+    if (
+      holder.organization_id === null ||
+      holder.organization_id !== callerOrganizationId
+    ) {
+      throw new ForbiddenException(
+        'You can only issue certificates to students in your organization',
+      );
+    }
+  }
+
+  private async assertIssuerRole(wallet: string): Promise<void> {
+    if (!ISSUER_ROLE) {
+      throw new InternalServerErrorException('ISSUER_ROLE env not configured');
+    }
+    const role = await this.blockchain.managerContract.ISSUER_ROLE();
+    const ok: boolean = await this.blockchain.managerContract.hasRole(
+      role,
+      wallet,
+    );
+    if (!ok) {
+      throw new ForbiddenException(
+        `Issuer wallet ${wallet} does not have ISSUER_ROLE on CertificateManager`,
+      );
+    }
+  }
+
+  private mapMetadata(m: CertificateMetadataPayloadDto): {
+    holder_full_name: string;
+    student_code?: string;
+    program_name: string;
+    major?: string;
+    degree_type?: string;
+    classification?: string;
+    gpa?: Prisma.Decimal;
+    graduation_year?: number;
+    issue_decision_number?: string;
+    issue_date?: Date;
+  } {
+    const issueDate = m.issue_date ? new Date(m.issue_date) : undefined;
+    return {
+      holder_full_name: m.holder_full_name,
+      student_code: m.student_code,
+      program_name: m.program_name,
+      major: m.major,
+      degree_type: m.degree_type,
+      classification: m.classification,
+      gpa: m.gpa !== undefined ? new Prisma.Decimal(m.gpa) : undefined,
+      graduation_year: m.graduation_year,
+      issue_decision_number: m.issue_decision_number,
+      issue_date:
+        issueDate && !Number.isNaN(issueDate.getTime()) ? issueDate : undefined,
+    };
+  }
+}
