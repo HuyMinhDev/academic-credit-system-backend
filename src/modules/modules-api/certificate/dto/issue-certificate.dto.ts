@@ -115,18 +115,8 @@ export class IssueCertificateDto {
   @IsDateString()
   expires_at?: string;
 
-  @ApiProperty({
-    description: 'Metadata URI (http(s), ipfs://, ar://)',
-    maxLength: 500,
-    example: 'ipfs://test-certificate-metadata',
-  })
-  @IsString()
-  @MaxLength(500)
-  metadata_uri!: string;
-
-  @ApiPropertyOptional({ type: () => CertificateMetadataPayloadDto })
-  @IsOptional()
+  @ApiProperty({ type: () => CertificateMetadataPayloadDto })
   @ValidateNested()
   @Type(() => CertificateMetadataPayloadDto)
-  certificate_metadata?: CertificateMetadataPayloadDto;
+  certificate_metadata!: CertificateMetadataPayloadDto;
 }

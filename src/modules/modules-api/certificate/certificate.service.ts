@@ -13,6 +13,7 @@ import { ethers } from 'ethers';
 import { Prisma } from '@prisma/client';
 import { PrismaService } from '../../modules-system/prisma/prisma.service';
 import { BlockchainService } from '../../modules-system/blockchain/blockchain.service';
+import { PinataService } from '../../modules-system/pinata/pinata.service';
 import {
   CERTIFICATE_MANAGER_ADDRESS,
   CHAIN_ID,
@@ -30,8 +31,8 @@ import {
   extractIpfsCid,
   normalizeAddress,
   normalizeCertificateCode,
-  normalizeMetadataUri,
   requireBytes32,
+  toIpfsGatewayUrl,
 } from './helpers/hash';
 
 const CONFIRMATIONS = 1;
@@ -146,6 +147,10 @@ function statusLabel(raw: number): string {
 import { LookupCertificateDto } from './dto/lookup-certificate.dto';
 import { VerifyCertificateDto } from './dto/verify-certificate.dto';
 import { RevokeCertificateDto } from './dto/revoke-certificate.dto';
+import {
+  CertificateHistoryEventType,
+  HistoryCertificateDto,
+} from './dto/history-certificate.dto';
 
 export interface LookupCertificateResult {
   certificate_id: number;
@@ -163,6 +168,7 @@ export interface LookupCertificateResult {
   status: string;
   revoked_at: Date | null;
   revocation_reason_hash: string | null;
+  revocation_reason: string | null;
   metadata_uri: string;
   on_chain_issued_at: string;
   on_chain_expires_at: string;
@@ -181,6 +187,59 @@ export interface LookupCertificateResult {
     issue_decision_number: string | null;
     issue_date: Date | null;
   } | null;
+}
+
+export interface CertificateHistoryEvent {
+  certificate_id?: number;
+  certificate_code?: string;
+  event_type: CertificateHistoryEventType;
+  tx_hash: string;
+  block_number: string;
+  block_timestamp: Date;
+  log_index: number;
+  chain_id: number;
+  actor_wallet_address: string;
+  actor_user_id: number | null;
+  reason_hash: string | null;
+  reason: string | null;
+  payload: Prisma.JsonValue;
+  indexed_at: Date;
+}
+
+export interface CertificateHistoryResult {
+  scope: 'certificate';
+  certificate_id: number;
+  token_id: string;
+  certificate_code: string;
+  organization_id: number;
+  issuer_user_id: number;
+  holder_user_id: number;
+  total_issued: number;
+  total_revoked: number;
+  events: CertificateHistoryEvent[];
+  pagination: {
+    page: number;
+    limit: number;
+    total: number;
+    total_pages: number;
+  };
+}
+
+export interface CertificateHistoryScopeResult {
+  scope: 'organization';
+  organization_id: number | null;
+  organization_ids: number[] | null;
+  holder_user_id: number | null;
+  total_certificates: number;
+  total_issued: number;
+  total_revoked: number;
+  events: CertificateHistoryEvent[];
+  pagination: {
+    page: number;
+    limit: number;
+    total: number;
+    total_pages: number;
+  };
 }
 
 export interface VerifyCertificateResult {
@@ -223,6 +282,7 @@ export class CertificateService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly blockchain: BlockchainService,
+    private readonly pinata: PinataService,
   ) {}
 
   async verify(
@@ -424,7 +484,7 @@ export class CertificateService {
       document_hash: cert.document_hash,
       issuer_wallet_address: cert.issuer_wallet_address,
       holder_wallet_address: cert.holder_wallet_address,
-      metadata_uri: cert.metadata_uri,
+      metadata_uri: toIpfsGatewayUrl(cert.metadata_uri),
       on_chain: {
         certificate_code_hash: onChain.certificateCodeHash,
         document_hash: onChain.documentHash,
@@ -460,16 +520,30 @@ export class CertificateService {
       );
     }
 
-    // Lấy tx_hash từ certificate_events thay vì query blockchain event
-    const issuedEvent = await this.prisma.certificate_events.findFirst({
-      where: {
-        certificate_id: cert.id,
-        event_type: 'Issued',
-      },
-      select: {
-        tx_hash: true,
-      },
-    });
+    const [issuedEvent, latestRevokedEvent] = await Promise.all([
+      this.prisma.certificate_events.findFirst({
+        where: {
+          certificate_id: cert.id,
+          event_type: 'Issued',
+        },
+        select: {
+          tx_hash: true,
+        },
+      }),
+      this.prisma.certificate_events.findFirst({
+        where: {
+          certificate_id: cert.id,
+          event_type: 'Revoked',
+        },
+        orderBy: [
+          { block_timestamp: 'desc' },
+          { log_index: 'desc' },
+        ],
+        select: {
+          reason: true,
+        },
+      }),
+    ]);
 
     let onChainCert: {
       certificateCodeHash: string;
@@ -510,7 +584,8 @@ export class CertificateService {
       status: this.mapStatus(cert.revoked_at, cert.expires_at),
       revoked_at: cert.revoked_at,
       revocation_reason_hash: cert.revocation_reason_hash ?? null,
-      metadata_uri: cert.metadata_uri,
+      revocation_reason: latestRevokedEvent?.reason ?? null,
+      metadata_uri: toIpfsGatewayUrl(cert.metadata_uri),
       on_chain_issued_at: onChainCert.issuedAt.toString(),
       on_chain_expires_at: onChainCert.expiresAt.toString(),
       on_chain_revoked_at: onChainCert.revokedAt.toString(),
@@ -540,6 +615,375 @@ export class CertificateService {
     return 'ACTIVE';
   }
 
+  async getHistory(
+    dto: HistoryCertificateDto,
+    caller: SchoolAdminCaller,
+  ): Promise<CertificateHistoryResult | CertificateHistoryScopeResult> {
+    const isSingleCertLookup = Boolean(dto.token_id || dto.certificate_code);
+
+    if (isSingleCertLookup) {
+      return this.getHistoryForSingleCertificate(dto, caller);
+    }
+    return this.getHistoryForScope(dto, caller);
+  }
+
+  private async getHistoryForSingleCertificate(
+    dto: HistoryCertificateDto,
+    caller: SchoolAdminCaller,
+  ): Promise<CertificateHistoryResult> {
+    // --- 1. Resolve the certificate ---------------------------------------
+    let cert: {
+      id: number;
+      token_id: bigint;
+      certificate_code: string;
+      organization_id: number;
+      issuer_user_id: number;
+      holder_user_id: number;
+    } | null = null;
+
+    if (dto.token_id) {
+      cert = await this.prisma.certificates.findFirst({
+        where: {
+          chain_id: CHAIN_ID,
+          contract_address: CERTIFICATE_MANAGER_ADDRESS,
+          token_id: BigInt(dto.token_id),
+        },
+        select: {
+          id: true,
+          token_id: true,
+          certificate_code: true,
+          organization_id: true,
+          issuer_user_id: true,
+          holder_user_id: true,
+        },
+      });
+    } else if (dto.certificate_code) {
+      const codeHashHex = ethers.keccak256(
+        ethers.toUtf8Bytes(dto.certificate_code),
+      );
+      cert = await this.prisma.certificates.findFirst({
+        where: {
+          chain_id: CHAIN_ID,
+          contract_address: CERTIFICATE_MANAGER_ADDRESS,
+          certificate_code_hash: codeHashHex,
+        },
+        select: {
+          id: true,
+          token_id: true,
+          certificate_code: true,
+          organization_id: true,
+          issuer_user_id: true,
+          holder_user_id: true,
+        },
+      });
+    }
+
+    if (!cert) {
+      throw new NotFoundException(
+        dto.certificate_code
+          ? `Certificate with code '${dto.certificate_code}' not found`
+          : `Certificate with token_id '${dto.token_id}' not found`,
+      );
+    }
+
+    // --- 2. Authorization (single cert) -----------------------------------
+    this.assertCanAccessCertificate(caller, {
+      organization_id: cert.organization_id,
+      holder_user_id: cert.holder_user_id,
+    });
+
+    // --- 3. Build event query ----------------------------------------------
+    const eventWhere = this.buildEventWhereForCertificate(cert.id, dto.type);
+
+    // --- 4. Aggregate counts (always Issued/Revoked totals, ignoring filter) -
+    const countGroups = await this.prisma.certificate_events.groupBy({
+      by: ['event_type'],
+      where: {
+        certificate_id: cert.id,
+        event_type: { in: ['Issued', 'Revoked'] },
+      },
+      _count: { _all: true },
+    });
+
+    const totalIssued = countGroups.find((g) => g.event_type === 'Issued')?._count._all ?? 0;
+    const totalRevoked = countGroups.find((g) => g.event_type === 'Revoked')?._count._all ?? 0;
+
+    // --- 5. Paginated event list -------------------------------------------
+    const { events, total } = await this.fetchHistoryEvents(
+      eventWhere,
+      dto.page,
+      dto.limit,
+    );
+
+    return {
+      scope: 'certificate',
+      certificate_id: cert.id,
+      token_id: cert.token_id.toString(),
+      certificate_code: cert.certificate_code,
+      organization_id: cert.organization_id,
+      issuer_user_id: cert.issuer_user_id,
+      holder_user_id: cert.holder_user_id,
+      total_issued: totalIssued,
+      total_revoked: totalRevoked,
+      events,
+      pagination: {
+        page: dto.page,
+        limit: dto.limit,
+        total,
+        total_pages: total === 0 ? 0 : Math.ceil(total / dto.limit),
+      },
+    };
+  }
+
+  private async getHistoryForScope(
+    dto: HistoryCertificateDto,
+    caller: SchoolAdminCaller,
+  ): Promise<CertificateHistoryScopeResult> {
+    // --- 1. Determine scope filters from caller role ----------------------
+    let organizationIds: number[] | null = null;
+    let singleOrganizationId: number | null = null;
+    let holderUserId: number | null = null;
+
+    if (caller.role === UserRole.SUPER_ADMIN) {
+      // no org filter
+    } else if (caller.role === UserRole.SCHOOL_ADMIN) {
+      if (caller.organization_id === null) {
+        throw new ForbiddenException('school_admin has no organization assigned');
+      }
+      organizationIds = [caller.organization_id];
+      singleOrganizationId = caller.organization_id;
+    } else if (caller.role === UserRole.STUDENT) {
+      holderUserId = caller.id;
+    } else {
+      throw new ForbiddenException(
+        'You are not authorized to view certificate history',
+      );
+    }
+
+    // --- 2. Resolve the certificate_id set we are scoping to ------------
+    const certWhere: Prisma.certificatesWhereInput = {
+      chain_id: CHAIN_ID,
+      contract_address: CERTIFICATE_MANAGER_ADDRESS,
+    };
+    if (organizationIds !== null) {
+      certWhere.organization_id = { in: organizationIds };
+    }
+    if (holderUserId !== null) {
+      certWhere.holder_user_id = holderUserId;
+    }
+
+    const certIds = await this.prisma.certificates.findMany({
+      where: certWhere,
+      select: { id: true },
+    });
+    const certIdList = certIds.map((c) => c.id);
+
+    // If no certificates in scope, return empty result immediately
+    if (certIdList.length === 0) {
+      return {
+        scope: 'organization',
+        organization_id: singleOrganizationId,
+        organization_ids: organizationIds,
+        holder_user_id: holderUserId,
+        total_certificates: 0,
+        total_issued: 0,
+        total_revoked: 0,
+        events: [],
+        pagination: {
+          page: dto.page,
+          limit: dto.limit,
+          total: 0,
+          total_pages: 0,
+        },
+      };
+    }
+
+    // --- 3. Build event query (filter by certificate_id set) ---------------
+    const eventWhere: Prisma.certificate_eventsWhereInput = {
+      certificate_id: { in: certIdList },
+    };
+    if (dto.type) {
+      eventWhere.event_type = dto.type;
+    } else {
+      eventWhere.event_type = { in: ['Issued', 'Revoked'] };
+    }
+
+    // --- 4. Aggregate counts (always Issued/Revoked totals, ignoring filter) -
+    const countGroups = await this.prisma.certificate_events.groupBy({
+      by: ['event_type'],
+      where: {
+        certificate_id: { in: certIdList },
+        event_type: { in: ['Issued', 'Revoked'] },
+      },
+      _count: { _all: true },
+    });
+
+    const totalIssued = countGroups.find((g) => g.event_type === 'Issued')?._count._all ?? 0;
+    const totalRevoked = countGroups.find((g) => g.event_type === 'Revoked')?._count._all ?? 0;
+
+    // --- 5. Paginated event list with certificate join --------------------
+    const skip = (dto.page - 1) * dto.limit;
+    const [eventsRaw, total] = await Promise.all([
+      this.prisma.certificate_events.findMany({
+        where: eventWhere,
+        orderBy: [
+          { block_timestamp: 'desc' },
+          { log_index: 'desc' },
+        ],
+        skip,
+        take: dto.limit,
+        select: {
+          certificate_id: true,
+          certificates: { select: { certificate_code: true } },
+          event_type: true,
+          tx_hash: true,
+          block_number: true,
+          block_timestamp: true,
+          log_index: true,
+          chain_id: true,
+          actor_wallet_address: true,
+          actor_user_id: true,
+          reason_hash: true,
+          reason: true,
+          payload: true,
+          indexed_at: true,
+        },
+      }),
+      this.prisma.certificate_events.count({ where: eventWhere }),
+    ]);
+
+    const events: CertificateHistoryEvent[] = eventsRaw.map((e) => ({
+      certificate_id: e.certificate_id ?? undefined,
+      certificate_code: e.certificates?.certificate_code,
+      event_type: e.event_type as CertificateHistoryEventType,
+      tx_hash: e.tx_hash,
+      block_number: e.block_number.toString(),
+      block_timestamp: e.block_timestamp,
+      log_index: e.log_index,
+      chain_id: e.chain_id,
+      actor_wallet_address: e.actor_wallet_address,
+      actor_user_id: e.actor_user_id,
+      reason_hash: e.reason_hash,
+      reason: e.reason,
+      payload: e.payload,
+      indexed_at: e.indexed_at,
+    }));
+
+    return {
+      scope: 'organization',
+      organization_id: singleOrganizationId,
+      organization_ids: organizationIds,
+      holder_user_id: holderUserId,
+      total_certificates: certIdList.length,
+      total_issued: totalIssued,
+      total_revoked: totalRevoked,
+      events,
+      pagination: {
+        page: dto.page,
+        limit: dto.limit,
+        total,
+        total_pages: total === 0 ? 0 : Math.ceil(total / dto.limit),
+      },
+    };
+  }
+
+  private assertCanAccessCertificate(
+    caller: SchoolAdminCaller,
+    cert: { organization_id: number; holder_user_id: number },
+  ): void {
+    if (caller.role === UserRole.SUPER_ADMIN) {
+      return;
+    }
+    if (caller.role === UserRole.SCHOOL_ADMIN) {
+      if (caller.organization_id === null) {
+        throw new ForbiddenException('school_admin has no organization assigned');
+      }
+      if (cert.organization_id !== caller.organization_id) {
+        throw new ForbiddenException(
+          'You can only view history for certificates in your organization',
+        );
+      }
+      return;
+    }
+    if (caller.role === UserRole.STUDENT) {
+      if (cert.holder_user_id !== caller.id) {
+        throw new ForbiddenException(
+          'You can only view history for your own certificates',
+        );
+      }
+      return;
+    }
+    throw new ForbiddenException(
+      'You are not authorized to view certificate history',
+    );
+  }
+
+  private buildEventWhereForCertificate(
+    certificateId: number,
+    type: CertificateHistoryEventType | undefined,
+  ): Prisma.certificate_eventsWhereInput {
+    const where: Prisma.certificate_eventsWhereInput = {
+      certificate_id: certificateId,
+    };
+    if (type) {
+      where.event_type = type;
+    } else {
+      where.event_type = { in: ['Issued', 'Revoked'] };
+    }
+    return where;
+  }
+
+  private async fetchHistoryEvents(
+    where: Prisma.certificate_eventsWhereInput,
+    page: number,
+    limit: number,
+  ): Promise<{ events: CertificateHistoryEvent[]; total: number }> {
+    const skip = (page - 1) * limit;
+    const [eventsRaw, total] = await Promise.all([
+      this.prisma.certificate_events.findMany({
+        where,
+        orderBy: [
+          { block_timestamp: 'desc' },
+          { log_index: 'desc' },
+        ],
+        skip,
+        take: limit,
+        select: {
+          event_type: true,
+          tx_hash: true,
+          block_number: true,
+          block_timestamp: true,
+          log_index: true,
+          chain_id: true,
+          actor_wallet_address: true,
+          actor_user_id: true,
+          reason_hash: true,
+          reason: true,
+          payload: true,
+          indexed_at: true,
+        },
+      }),
+      this.prisma.certificate_events.count({ where }),
+    ]);
+
+    const events: CertificateHistoryEvent[] = eventsRaw.map((e) => ({
+      event_type: e.event_type as CertificateHistoryEventType,
+      tx_hash: e.tx_hash,
+      block_number: e.block_number.toString(),
+      block_timestamp: e.block_timestamp,
+      log_index: e.log_index,
+      chain_id: e.chain_id,
+      actor_wallet_address: e.actor_wallet_address,
+      actor_user_id: e.actor_user_id,
+      reason_hash: e.reason_hash,
+      reason: e.reason,
+      payload: e.payload,
+      indexed_at: e.indexed_at,
+    }));
+
+    return { events, total };
+  }
+
   async issue(
     dto: IssueCertificateDto,
     caller: SchoolAdminCaller,
@@ -566,13 +1010,6 @@ export class CertificateService {
       );
     }
 
-    const metadataUri = normalizeMetadataUri(dto.metadata_uri);
-    if (!metadataUri) {
-      throw new BadRequestException(
-        'metadata_uri must start with http(s)://, ipfs://, ar://, or data:',
-      );
-    }
-
     let expiresAt = 0;
     if (dto.expires_at) {
       expiresAt = Math.floor(new Date(dto.expires_at).getTime() / 1000);
@@ -589,6 +1026,21 @@ export class CertificateService {
     const holder = await this.loadHolder(dto.holder_user_id);
     // check nếu user cùng org với school_admin
     this.assertSameOrganization(holder, organizationId);
+
+    // --- 2.5 Build & upload metadata to Pinata (after holder is loaded) ------
+    const metadataUri = await this.buildAndUploadMetadata(
+      certCode,
+      docHashHex,
+      dto,
+      organizationId,
+      caller.id,
+      holder,
+    );
+    if (!metadataUri) {
+      throw new BadRequestException(
+        'Failed to build/upload certificate metadata to Pinata',
+      );
+    }
 
     // --- 3. Pre-flight on-chain uniqueness ----------------------------------
     let usedOnChain: boolean;
@@ -804,6 +1256,7 @@ export class CertificateService {
             chain_id: CHAIN_ID,
             actor_wallet_address: issued.issuer.toLowerCase(),
             actor_user_id: caller.id,
+            reason: null,
             payload: {
               args: {
                 holder: issued.holder,
@@ -843,7 +1296,7 @@ export class CertificateService {
         contract_address: CERTIFICATE_MANAGER_ADDRESS,
         chain_id: CHAIN_ID,
         document_hash: issued.documentHash,
-        metadata_uri: metadataUri,
+        metadata_uri: toIpfsGatewayUrl(metadataUri),
         status: cert.status,
         issued_at: issuedAt,
         expires_at: expiresAtDate,
@@ -1168,6 +1621,7 @@ export class CertificateService {
             chain_id: CHAIN_ID,
             actor_wallet_address: issuerWallet.toLowerCase(),
             actor_user_id: caller.id,
+            reason: reasonText,
             reason_hash: chainReasonHash,
             payload: {
               args: {
@@ -1338,6 +1792,59 @@ export class CertificateService {
       issue_decision_number: m.issue_decision_number,
       issue_date:
         issueDate && !Number.isNaN(issueDate.getTime()) ? issueDate : undefined,
+    };
+  }
+
+  /**
+   * Builds a JSON document describing the certificate and uploads it to IPFS
+   * via Pinata. Returns the `ipfs://<cid>` URI that is stored in DB and on-chain.
+   */
+  private async buildAndUploadMetadata(
+    certificateCode: string,
+    documentHashHex: string,
+    dto: IssueCertificateDto,
+    organizationId: number,
+    issuerUserId: number,
+    holder: { id: number; wallet_address: string },
+  ): Promise<string> {
+    const metadata = {
+      name: `Certificate ${certificateCode}`,
+      description: 'Academic certificate metadata anchored on-chain',
+      certificate_code: certificateCode,
+      document_hash: documentHashHex,
+      expires_at: dto.expires_at ?? null,
+      organization_id: organizationId,
+      issuer: {
+        user_id: issuerUserId,
+        wallet_address: '', // filled below by caller via blockchain manager if needed
+      },
+      holder: {
+        user_id: holder.id,
+        wallet_address: holder.wallet_address,
+      },
+      attributes: this.buildMetadataAttributes(dto.certificate_metadata),
+    };
+    const ipfsUri = await this.pinata.uploadJson(
+      `${certificateCode}.json`,
+      metadata,
+    );
+    return ipfsUri;
+  }
+
+  private buildMetadataAttributes(
+    m: CertificateMetadataPayloadDto,
+  ): Record<string, string | number | null> {
+    return {
+      holder_full_name: m.holder_full_name,
+      student_code: m.student_code ?? null,
+      program_name: m.program_name,
+      major: m.major ?? null,
+      degree_type: m.degree_type ?? null,
+      classification: m.classification ?? null,
+      gpa: m.gpa ?? null,
+      graduation_year: m.graduation_year ?? null,
+      issue_decision_number: m.issue_decision_number ?? null,
+      issue_date: m.issue_date ?? null,
     };
   }
 }

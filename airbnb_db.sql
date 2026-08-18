@@ -375,6 +375,9 @@ CREATE INDEX IF NOT EXISTS idx_events_actor_user
 CREATE INDEX IF NOT EXISTS idx_events_timestamp
     ON certificate_events (block_timestamp DESC);
 
+ALTER TABLE certificate_events
+ADD COLUMN IF NOT EXISTS reason TEXT;
+
 
 -- =========================================================
 -- 6. wallet_bindings — Audit liên kết ví ↔ user

@@ -30,6 +30,10 @@ export const ISSUER_PRIVATE_KEY = (process.env.ISSUER_PRIVATE_KEY ?? '').trim() 
   | `0x${string}`
   | '';
 
+// ---- IPFS / Pinata ----
+export const PINATA_JWT = (process.env.PINATA_JWT ?? '').trim();
+export const PINATA_GATEWAY = (process.env.PINATA_GATEWAY ?? '').trim();
+
 
 export function assertIssuerPrivateKeyConfigured(): void {
   const v = ISSUER_PRIVATE_KEY;
