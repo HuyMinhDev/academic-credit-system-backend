@@ -1,4 +1,5 @@
 import { ethers } from 'ethers';
+import { PINATA_GATEWAY } from '../../../../common/constant/app.constant';
 
 /**
  * Validate a 0x-prefixed 32-byte hex string (bytes32).
@@ -103,4 +104,13 @@ export function extractIpfsCid(metadataUri: string): string | null {
   // CIDv0 starts with Qm (base58), CIDv1 starts with b (base32).
   const m = /^([A-Za-z0-9]+)/.exec(rest);
   return m ? m[1] : null;
+}
+
+export function toIpfsGatewayUrl(metadataUri: string | null | undefined): string {
+  if (!metadataUri) return '';
+  if (!metadataUri.startsWith('ipfs://')) return metadataUri;
+  const gateway = PINATA_GATEWAY;
+  if (!gateway) return metadataUri;
+  const cidPath = metadataUri.slice('ipfs://'.length);
+  return `https://${gateway}/ipfs/${cidPath}`;
 }

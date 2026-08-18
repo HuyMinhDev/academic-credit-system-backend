@@ -30,6 +30,24 @@ export const ISSUER_PRIVATE_KEY = (process.env.ISSUER_PRIVATE_KEY ?? '').trim() 
   | `0x${string}`
   | '';
 
+// ---- IPFS / Pinata ----
+export const PINATA_JWT = (process.env.PINATA_JWT ?? '').trim();
+export const PINATA_GATEWAY = (process.env.PINATA_GATEWAY ?? '').trim();
+
+
+export function assertIssuerPrivateKeyConfigured(): void {
+  const v = ISSUER_PRIVATE_KEY;
+  if (!v) {
+    throw new Error('ISSUER_PRIVATE_KEY is not set in environment');
+  }
+  const hex = v.startsWith('0x') || v.startsWith('0X') ? v.slice(2) : v;
+  if (!/^[0-9a-fA-F]{64}$/.test(hex)) {
+    throw new Error(
+      `ISSUER_PRIVATE_KEY has invalid format: expected 64 hex chars (32-byte private key), optionally 0x-prefixed, got length=${v.length}`,
+    );
+  }
+}
+
 console.log({
   DATABASE_URL,
   ACCESS_TOKEN_SECRET,

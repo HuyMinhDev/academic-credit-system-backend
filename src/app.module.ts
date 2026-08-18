@@ -5,6 +5,7 @@ import { PrismaModule } from './modules/modules-system/prisma/prisma.module';
 import { AuthModule } from './modules/modules-api/auth/auth.module';
 import { TokenModule } from './modules/modules-system/token/token.module';
 import { BlockchainModule } from './modules/modules-system/blockchain/blockchain.module';
+import { PinataModule } from './modules/modules-system/pinata/pinata.module';
 
 import { UserModule } from './modules/modules-api/user/user.module';
 import { OrganizationModule } from './modules/modules-api/organization/organization.module';
@@ -18,6 +19,7 @@ import { CertificateModule } from './modules/modules-api/certificate/certificate
     AuthModule,
     TokenModule,
     BlockchainModule,
+    PinataModule,
     UserModule,
     OrganizationModule,
     FileModule,
