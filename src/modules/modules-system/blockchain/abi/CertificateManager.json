@@ -141,7 +141,7 @@
       "name": "CertificateRevoked",
       "inputs": [
         { "name": "tokenId", "type": "uint256", "indexed": true },
-        { "name": "revokedBy", "type": "address", "indexed": false },
+        { "name": "revokedBy", "type": "address", "indexed": true },
         { "name": "reasonHash", "type": "bytes32", "indexed": false }
       ],
       "anonymous": false

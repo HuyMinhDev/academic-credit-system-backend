@@ -15,6 +15,7 @@ import { CertificateService } from './certificate.service';
 import { IssueCertificateDto } from './dto/issue-certificate.dto';
 import { LookupCertificateDto } from './dto/lookup-certificate.dto';
 import { VerifyCertificateDto } from './dto/verify-certificate.dto';
+import { RevokeCertificateDto } from './dto/revoke-certificate.dto';
 import { responseSuccess } from '../../../common/helpers/response.helper';
 import { Roles } from '../../../common/decorators/roles.decorator';
 import { RolesGuard } from '../../../common/protect/roles.guard';
@@ -74,5 +75,29 @@ export class CertificateController {
       wallet_address: caller.wallet_address,
     });
     return responseSuccess(result, 'Certificate issued successfully', 201);
+  }
+
+  @Post('revoke')
+  @Roles(UserRole.SCHOOL_ADMIN, UserRole.SUPER_ADMIN)
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({
+    summary:
+      'Revoke a certificate on-chain. Backend signs and broadcasts the transaction using ISSUER_PRIVATE_KEY, then persists revoked_at + revocation_reason_hash + event.',
+  })
+  async revoke(
+    @Body() dto: RevokeCertificateDto,
+    @Req() req: RequestWithUser,
+  ) {
+    const caller = req.user;
+    if (!caller) {
+      throw new Error('Unauthenticated');
+    }
+    const result = await this.service.revoke(dto, {
+      id: caller.id,
+      role: caller.role as UserRole,
+      organization_id: caller.organization_id,
+      wallet_address: caller.wallet_address,
+    });
+    return responseSuccess(result, 'Certificate revoked successfully');
   }
 }

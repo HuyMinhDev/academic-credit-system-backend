@@ -10,6 +10,7 @@ import {
   CERTIFICATE_MANAGER_ADDRESS,
   CERTIFICATE_TOKEN_ADDRESS,
   CHAIN_ID,
+  assertIssuerPrivateKeyConfigured,
 } from '../../../common/constant/app.constant';
 
 import CertificateManagerAbi from './abi/CertificateManager.json';
@@ -52,6 +53,7 @@ export class BlockchainService implements OnModuleInit {
         'CERTIFICATE_TOKEN_ADDRESS is not set in environment',
       );
     }
+    assertIssuerPrivateKeyConfigured();
 
     this.provider = new ethers.JsonRpcProvider(BLOCKCHAIN_RPC_URL, {
       chainId: CHAIN_ID,

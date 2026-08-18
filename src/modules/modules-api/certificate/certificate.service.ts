@@ -25,7 +25,7 @@ import {
   CertificateMetadataPayloadDto,
   IssueCertificateDto,
 } from './dto/issue-certificate.dto';
-import { findCertificateIssuedEvent } from './helpers/event-parser';
+import { findCertificateIssuedEvent, findCertificateRevokedEvent } from './helpers/event-parser';
 import {
   extractIpfsCid,
   normalizeAddress,
@@ -65,6 +65,22 @@ export interface IssuedCertificateResult {
   expires_at: Date | null;
 }
 
+export interface RevokedCertificateResult {
+  certificate_id: number;
+  token_id: string;
+  tx_hash: string;
+  block_number: number;
+  block_timestamp: Date;
+  certificate_code: string;
+  document_hash: string;
+  organization_id: number;
+  issuer_user_id: number;
+  revoked_by_wallet_address: string;
+  revocation_reason_hash: string;
+  status: string;
+  revoked_at: Date;
+}
+
 /**
  * Maps a smart-contract / ethers revert message to a friendlier HTTP error.
  * Falls back to a generic BadGateway for unknown messages.
@@ -87,6 +103,17 @@ function mapBlockchainError(err: unknown): Error {
   }
   if (lower.includes('invalid metadata uri') || lower.includes('invalid metadatauri')) {
     return new BadRequestException('invalid metadata_uri on-chain');
+  }
+  if (lower.includes('certificate not found')) {
+    return new NotFoundException('certificate not found on-chain');
+  }
+  if (lower.includes('not authorized')) {
+    return new ForbiddenException(
+      'caller is not authorized to revoke this certificate',
+    );
+  }
+  if (lower.includes('already revoked')) {
+    return new ConflictException('certificate is already revoked on-chain');
   }
   if (lower.includes('accesscontrol') || lower.includes('missing role')) {
     return new ForbiddenException(
@@ -118,6 +145,7 @@ function statusLabel(raw: number): string {
 
 import { LookupCertificateDto } from './dto/lookup-certificate.dto';
 import { VerifyCertificateDto } from './dto/verify-certificate.dto';
+import { RevokeCertificateDto } from './dto/revoke-certificate.dto';
 
 export interface LookupCertificateResult {
   certificate_id: number;
@@ -486,7 +514,7 @@ export class CertificateService {
       on_chain_issued_at: onChainCert.issuedAt.toString(),
       on_chain_expires_at: onChainCert.expiresAt.toString(),
       on_chain_revoked_at: onChainCert.revokedAt.toString(),
-      on_chain_status: onChainCert.status,
+      on_chain_status: Number(onChainCert.status),
       tx_hash: issuedEvent?.tx_hash ?? '',
       metadata: cert.certificate_metadata
         ? {
@@ -783,7 +811,7 @@ export class CertificateService {
                 documentHash: issued.documentHash,
                 expiresAt: Number(issued.expiresAt),
               },
-            } as Prisma.InputJsonValue,
+            },
           },
         });
 
@@ -821,8 +849,6 @@ export class CertificateService {
         expires_at: expiresAtDate,
       };
     } catch (err) {
-      // Chain tx succeeded, DB write failed. We cannot rollback the chain.
-      // Log clearly so the tx_hash is recoverable for manual reconciliation.
       if (
         err instanceof Prisma.PrismaClientKnownRequestError &&
         err.code === 'P2002'
@@ -841,9 +867,360 @@ export class CertificateService {
     }
   }
 
+  async revoke(
+    dto: RevokeCertificateDto,
+    caller: SchoolAdminCaller,
+  ): Promise<RevokedCertificateResult> {
+    this.assertRevokeAuthorized(caller);
+    this.assertIssuerKeyConfigured();
+    this.assertContractConfigured();
+
+    // --- 1. Validate token_id ----------------------------------------------
+    if (!/^\d+$/.test(dto.token_id)) {
+      throw new BadRequestException('token_id must be a numeric string');
+    }
+    const tokenId = BigInt(dto.token_id);
+
+    // --- 2. Compute reason hash --------------------------------------------
+    const reasonText = dto.reason.trim();
+    const reasonHashHex = ethers.keccak256(
+      ethers.toUtf8Bytes(reasonText),
+    ) as `0x${string}`;
+
+    // --- 3. Resolve DB record ----------------------------------------------
+    const cert = await this.prisma.certificates.findFirst({
+      where: {
+        chain_id: CHAIN_ID,
+        contract_address: CERTIFICATE_MANAGER_ADDRESS,
+        token_id: tokenId,
+      },
+      select: {
+        id: true,
+        token_id: true,
+        certificate_code: true,
+        document_hash: true,
+        organization_id: true,
+        issuer_user_id: true,
+        issuer_wallet_address: true,
+        revoked_at: true,
+        revocation_reason_hash: true,
+        status: true,
+      },
+    });
+
+    if (!cert) {
+      throw new NotFoundException(
+        `Certificate with token_id '${dto.token_id}' not found in DB`,
+      );
+    }
+
+    // School admin chỉ được thu hồi chứng chỉ trong cùng tổ chức của họ
+    if (
+      caller.role === UserRole.SCHOOL_ADMIN &&
+      cert.organization_id !== caller.organization_id
+    ) {
+      throw new ForbiddenException(
+        'You can only revoke certificates in your organization',
+      );
+    }
+
+    if (cert.revoked_at !== null) {
+      throw new ConflictException(
+        `Certificate already revoked at ${cert.revoked_at.toISOString()}`,
+      );
+    }
+
+    // --- 4. Issuer wallet from ISSUER_PRIVATE_KEY ---------------------------
+    const issuerAccount = new ethers.Wallet(ISSUER_PRIVATE_KEY, this.blockchain.provider);
+    const issuerWallet = normalizeAddress(issuerAccount.address);
+    if (!issuerWallet) {
+      throw new InternalServerErrorException(
+        'ISSUER_PRIVATE_KEY did not derive a valid address',
+      );
+    }
+
+    // For non-admin callers, the env wallet must match the original issuer wallet.
+    if (caller.role !== UserRole.SUPER_ADMIN) {
+      const onChainCert =
+        await this.blockchain.managerContract.getCertificate(tokenId);
+      if (
+        onChainCert.issuer.toLowerCase() !==
+        issuerWallet.toLowerCase()
+      ) {
+        throw new ForbiddenException(
+          'Revoke requires the original issuer wallet (ISSUER_PRIVATE_KEY does not match on-chain issuer)',
+        );
+      }
+    }
+
+    // --- 5. Build EIP-1559 tx skeleton -------------------------------------
+    const iface = this.blockchain.managerContract.interface;
+    const data = iface.encodeFunctionData('revokeCertificate', [
+      tokenId,
+      reasonHashHex,
+    ]);
+
+    const nonce = await this.blockchain.provider.getTransactionCount(
+      issuerWallet,
+      'pending',
+    );
+
+    let feeData: ethers.FeeData;
+    try {
+      feeData = await this.blockchain.provider.getFeeData();
+    } catch (err) {
+      throw new ServiceUnavailableException(
+        `Could not fetch fee data: ${(err as Error).message}`,
+      );
+    }
+
+    const maxPriorityFeePerGas =
+      feeData.maxPriorityFeePerGas ?? 1_500_000n; // 1.5 gwei fallback
+    const baseFee = feeData.maxFeePerGas ?? feeData.gasPrice ?? 30_000_000n;
+    const maxFeePerGas = baseFee + maxPriorityFeePerGas;
+
+    let estimatedGas: bigint;
+    try {
+      estimatedGas =
+        await this.blockchain.managerContract.revokeCertificate.estimateGas(
+          tokenId,
+          reasonHashHex,
+          { from: issuerWallet },
+        );
+    } catch (err) {
+      throw mapBlockchainError(err);
+    }
+    const gasLimit = (estimatedGas * BigInt(10000 + GAS_BUFFER_BPS)) / 10000n;
+
+    const txRequest: ethers.TransactionRequest = {
+      to: CERTIFICATE_MANAGER_ADDRESS,
+      data,
+      value: 0n,
+      chainId: CHAIN_ID,
+      nonce,
+      gasLimit,
+      maxFeePerGas,
+      maxPriorityFeePerGas,
+      type: 2,
+    };
+
+    // --- 6. Sign + send ----------------------------------------------------
+    let txResponse: ethers.TransactionResponse;
+    try {
+      const signed = await issuerAccount.signTransaction(txRequest);
+      txResponse = await this.blockchain.provider.broadcastTransaction(
+        signed,
+      );
+    } catch (err) {
+      throw mapBlockchainError(err);
+    }
+
+    // --- 7. Wait for receipt ----------------------------------------------
+    let receipt: ethers.TransactionReceipt | null;
+    try {
+      receipt = await this.blockchain.provider.waitForTransaction(
+        txResponse.hash,
+        CONFIRMATIONS,
+        120_000,
+      );
+    } catch (err) {
+      throw new BadGatewayException(
+        `tx=${txResponse.hash} broadcast but confirmations failed: ${(err as Error).message}`,
+      );
+    }
+    if (!receipt) {
+      throw new BadGatewayException(
+        `tx=${txResponse.hash} broadcast but no receipt`,
+      );
+    }
+    if (receipt.status !== 1) {
+      throw new BadGatewayException(
+        `Blockchain transaction reverted (tx=${txResponse.hash})`,
+      );
+    }
+
+    // --- 8. Parse CertificateRevoked event (with reconciliation fallback) -
+    let revoked = findCertificateRevokedEvent(receipt);
+    let chainReasonHash: string | null = null;
+    let revokedAt: Date | null = null;
+    let revokedLogIndex: number | null = null;
+    let parsedOk = false;
+
+    if (revoked) {
+      parsedOk = true;
+      if (revoked.tokenId !== tokenId) {
+        throw new InternalServerErrorException(
+          `Event tokenId (${revoked.tokenId.toString()}) does not match target (${tokenId.toString()})`,
+        );
+      }
+      if (revoked.revokedBy.toLowerCase() !== issuerWallet.toLowerCase()) {
+        throw new InternalServerErrorException(
+          `Event revokedBy (${revoked.revokedBy}) does not match signer (${issuerWallet})`,
+        );
+      }
+      chainReasonHash = revoked.reasonHash.toLowerCase();
+      revokedLogIndex = revoked.logIndex;
+    } else {
+      this.logger.warn(
+        `CertificateRevoked event not found in receipt logs of tx=${txResponse.hash}; falling back to on-chain state`,
+      );
+    }
+
+    // --- 9. Resolve block timestamp --------------------------------------
+    let block: ethers.Block | null;
+    try {
+      block = await this.blockchain.provider.getBlock(receipt.blockNumber);
+    } catch (err) {
+      throw new BadGatewayException(
+        `Cannot fetch block ${receipt.blockNumber} for tx=${txResponse.hash}: ${(err as Error).message}`,
+      );
+    }
+    if (!block) {
+      throw new BadGatewayException(
+        `Block ${receipt.blockNumber} not found for tx=${txResponse.hash}`,
+      );
+    }
+
+    if (parsedOk) {
+      revokedAt = new Date(Number(block.timestamp) * 1000);
+    } else {
+      let onChainCert: {
+        certificateCodeHash: string;
+        documentHash: string;
+        issuer: string;
+        issuedAt: bigint;
+        expiresAt: bigint;
+        revokedAt: bigint;
+        previousTokenId: bigint;
+        replacementTokenId: bigint;
+        status: bigint | number;
+        revocationReasonHash: string;
+      };
+      try {
+        onChainCert =
+          (await this.blockchain.managerContract.getCertificate(tokenId)) as {
+            certificateCodeHash: string;
+            documentHash: string;
+            issuer: string;
+            issuedAt: bigint;
+            expiresAt: bigint;
+            revokedAt: bigint;
+            previousTokenId: bigint;
+            replacementTokenId: bigint;
+            status: bigint | number;
+            revocationReasonHash: string;
+          };
+      } catch (err) {
+        throw new BadGatewayException(
+          `Could not reconcile on-chain state after missing event for tx=${txResponse.hash}: ${(err as Error).message}`,
+        );
+      }
+
+      const onChainStatus = Number(onChainCert.status);
+      const onChainRevokedAtSec = Number(onChainCert.revokedAt);
+      const onChainRevoked =
+        onChainStatus === 1 /* Revoked */ && onChainRevokedAtSec > 0;
+
+      if (!onChainRevoked) {
+        throw new InternalServerErrorException(
+          `CertificateRevoked event missing AND on-chain state for tokenId=${tokenId.toString()} does not show Revoked (status=${onChainStatus}, revokedAt=${onChainRevokedAtSec}) (tx=${txResponse.hash}); manual reconciliation required`,
+        );
+      }
+
+      chainReasonHash = String(onChainCert.revocationReasonHash ?? '').toLowerCase();
+      revokedAt = new Date(onChainRevokedAtSec * 1000);
+      revokedLogIndex = -1;
+
+      this.logger.log(
+        `Reconciled revoke from on-chain state for tx=${txResponse.hash} tokenId=${tokenId.toString()}`,
+      );
+    }
+
+    // --- 10. Persist (single DB transaction) -----------------------------
+    try {
+      const safeReceipt = receipt;
+      const updated = await this.prisma.$transaction(async (tx) => {
+        const upd = await tx.certificates.update({
+          where: { id: cert.id },
+          data: {
+            status: 'Revoked',
+            revoked_at: revokedAt,
+            revoked_by_wallet: issuerWallet.toLowerCase(),
+            revocation_reason_hash: chainReasonHash,
+            updated_at: revokedAt,
+          },
+          select: {
+            id: true,
+            token_id: true,
+            status: true,
+          },
+        });
+
+        await tx.certificate_events.create({
+          data: {
+            certificate_id: upd.id,
+            token_id: upd.token_id,
+            event_type: 'Revoked',
+            tx_hash: txResponse.hash,
+            block_number: safeReceipt.blockNumber,
+            block_timestamp: revokedAt,
+            log_index: revokedLogIndex ?? -1,
+            chain_id: CHAIN_ID,
+            actor_wallet_address: issuerWallet.toLowerCase(),
+            actor_user_id: caller.id,
+            reason_hash: chainReasonHash,
+            payload: {
+              args: {
+                reasonHash: chainReasonHash,
+              },
+              reconciled: !parsedOk,
+            },
+          },
+        });
+
+        return upd;
+      });
+
+      return {
+        certificate_id: updated.id,
+        token_id: updated.token_id.toString(),
+        tx_hash: txResponse.hash,
+        block_number: Number(receipt.blockNumber),
+        block_timestamp: revokedAt,
+        certificate_code: cert.certificate_code,
+        document_hash: cert.document_hash,
+        organization_id: cert.organization_id,
+        issuer_user_id: cert.issuer_user_id,
+        revoked_by_wallet_address: issuerWallet.toLowerCase(),
+        revocation_reason_hash: chainReasonHash,
+        status: updated.status,
+        revoked_at: revokedAt,
+      };
+    } catch (err) {
+      this.logger.error(
+        `DB write failed AFTER successful revoke chain tx=${txResponse.hash} (tokenId=${tokenId.toString()}): ${(err as Error).message}`,
+        (err as Error).stack,
+      );
+      throw new InternalServerErrorException(
+        `Persisted chain tx=${txResponse.hash} but DB write failed: ${(err as Error).message}. The chain tx is final; reconcile manually.`,
+      );
+    }
+  }
+
   // ------------------------------------------------------------------
   // helpers
   // ------------------------------------------------------------------
+
+  private assertRevokeAuthorized(caller: SchoolAdminCaller): void {
+    if (
+      caller.role !== UserRole.SCHOOL_ADMIN &&
+      caller.role !== UserRole.SUPER_ADMIN
+    ) {
+      throw new ForbiddenException(
+        'Only school_admin or super_admin can revoke certificates',
+      );
+    }
+  }
 
   private assertSchoolAdmin(caller: SchoolAdminCaller): void {
     if (caller.role !== UserRole.SCHOOL_ADMIN) {
@@ -956,7 +1333,7 @@ export class CertificateService {
       major: m.major,
       degree_type: m.degree_type,
       classification: m.classification,
-      gpa: m.gpa !== undefined ? new Prisma.Decimal(m.gpa) : undefined,
+      gpa: m.gpa === undefined ? undefined : new Prisma.Decimal(m.gpa),
       graduation_year: m.graduation_year,
       issue_decision_number: m.issue_decision_number,
       issue_date:
