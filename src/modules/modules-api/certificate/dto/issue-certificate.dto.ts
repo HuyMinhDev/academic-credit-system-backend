@@ -4,7 +4,6 @@ import {
   IsNumber,
   IsOptional,
   IsString,
-  Matches,
   Max,
   MaxLength,
   Min,
@@ -12,8 +11,6 @@ import {
 } from 'class-validator';
 import { Type } from 'class-transformer';
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
-
-const BYTES32_REGEX = /^0x[0-9a-fA-F]{64}$/;
 
 export class CertificateMetadataPayloadDto {
   @ApiProperty({ maxLength: 255 })
@@ -76,9 +73,11 @@ export class CertificateMetadataPayloadDto {
   issue_date?: string;
 }
 
+
 export class IssueCertificateDto {
   @ApiProperty({
-    description: 'Student user id (must have wallet_address bound)',
+    description:
+      'Student user id. Must exist, must not be deleted, must have wallet_address bound, must belong to the callers organization.',
     example: 12,
   })
   @IsInt()
@@ -95,21 +94,11 @@ export class IssueCertificateDto {
   @MaxLength(100)
   certificate_code!: string;
 
-  @ApiProperty({
-    description: '0x-prefixed 32-byte hex (document hash).',
-    example: '0x1111111111111111111111111111111111111111111111111111111111111111',
-  })
-  @IsString()
-  @Matches(BYTES32_REGEX, {
-    message: 'document_hash must be 0x followed by exactly 64 hex chars',
-  })
-  @MaxLength(66)
-  document_hash!: string;
-
   @ApiPropertyOptional({
     description:
       'Expiration date (ISO 8601 UTC). null = no expiry. Must be in the future.',
     example: '2027-08-15T23:59:59Z',
+    nullable: true,
   })
   @IsOptional()
   @IsDateString()
