@@ -255,6 +255,10 @@ CREATE INDEX IF NOT EXISTS idx_certs_issued_at
     ON certificates (issued_at DESC);
 
 
+ALTER TABLE certificates
+ADD COLUMN document_uri VARCHAR(500),
+ADD COLUMN document_ipfs_cid VARCHAR(100);
+
 -- =========================================================
 -- 4. certificate_metadata — Nội dung chứng chỉ off-chain
 -- =========================================================

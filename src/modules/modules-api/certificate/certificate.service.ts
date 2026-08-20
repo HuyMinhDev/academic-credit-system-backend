@@ -9,6 +9,7 @@ import {
   NotFoundException,
   ServiceUnavailableException,
 } from '@nestjs/common';
+import { createHash } from 'node:crypto';
 import { ethers } from 'ethers';
 import { Prisma } from '@prisma/client';
 import { PrismaService } from '../../modules-system/prisma/prisma.service';
@@ -22,6 +23,7 @@ import {
 } from '../../../common/constant/app.constant';
 import { UserRole } from '../../../common/enums/user-role.enum';
 
+import { CertificatePdfService } from './certificate-pdf.service';
 import {
   CertificateMetadataPayloadDto,
   IssueCertificateDto,
@@ -52,6 +54,7 @@ export interface IssuedCertificateResult {
   block_number: number;
   block_timestamp: Date;
   certificate_code: string;
+
   holder_user_id: number;
   holder_wallet_address: string;
   organization_id: number;
@@ -59,8 +62,14 @@ export interface IssuedCertificateResult {
   issuer_wallet_address: string;
   contract_address: string;
   chain_id: number;
+
   document_hash: string;
+  document_ipfs_cid: string | null;
+  document_uri: string | null;
+
+  metadata_ipfs_cid: string | null;
   metadata_uri: string;
+
   status: string;
   issued_at: Date;
   expires_at: Date | null;
@@ -151,6 +160,7 @@ import {
   CertificateHistoryEventType,
   HistoryCertificateDto,
 } from './dto/history-certificate.dto';
+import { formatVietnamTime } from 'src/common/helpers/datetime.helper';
 
 export interface LookupCertificateResult {
   certificate_id: number;
@@ -283,6 +293,7 @@ export class CertificateService {
     private readonly prisma: PrismaService,
     private readonly blockchain: BlockchainService,
     private readonly pinata: PinataService,
+    private readonly pdfService: CertificatePdfService,
   ) {}
 
   async verify(
@@ -1003,13 +1014,6 @@ export class CertificateService {
       throw new BadRequestException('certificate_code invalid (1..100 chars)');
     }
 
-    const docHashHex = requireBytes32(dto.document_hash);
-    if (!docHashHex) {
-      throw new BadRequestException(
-        'document_hash must be 0x followed by exactly 64 hex chars',
-      );
-    }
-
     let expiresAt = 0;
     if (dto.expires_at) {
       expiresAt = Math.floor(new Date(dto.expires_at).getTime() / 1000);
@@ -1024,25 +1028,99 @@ export class CertificateService {
 
     // --- 2. Holder checks ---------------------------------------------------
     const holder = await this.loadHolder(dto.holder_user_id);
-    // check nếu user cùng org với school_admin
     this.assertSameOrganization(holder, organizationId);
 
-    // --- 2.5 Build & upload metadata to Pinata (after holder is loaded) ------
-    const metadataUri = await this.buildAndUploadMetadata(
-      certCode,
-      docHashHex,
-      dto,
-      organizationId,
-      caller.id,
-      holder,
-    );
-    if (!metadataUri) {
-      throw new BadRequestException(
-        'Failed to build/upload certificate metadata to Pinata',
+    // --- 2.0 Load organization for PDF generation ---------------------------
+    const organization = await this.prisma.organizations.findUnique({
+      where: { id: organizationId },
+      select: { id: true, name: true, code: true, address: true },
+    });
+    if (!organization) {
+      throw new NotFoundException(
+        `organization ${organizationId} not found in DB`,
       );
     }
 
-    // --- 3. Pre-flight on-chain uniqueness ----------------------------------
+    // --- 2.5 Pre-flight DB uniqueness ---------------------------------------
+    const inDb = await this.prisma.certificates.findFirst({
+      where: {
+        chain_id: CHAIN_ID,
+        contract_address: CERTIFICATE_MANAGER_ADDRESS,
+        certificate_code_hash: codeHashHex,
+      },
+      select: { id: true },
+    });
+    if (inDb) {
+      throw new ConflictException('certificate_code already recorded in DB');
+    }
+
+    // --- 3. Issuer wallet from ISSUER_PRIVATE_KEY ---------------------------
+    const issuerAccount = new ethers.Wallet(ISSUER_PRIVATE_KEY, this.blockchain.provider);
+    const issuerWallet = normalizeAddress(issuerAccount.address);
+    if (!issuerWallet) {
+      throw new InternalServerErrorException(
+        'ISSUER_PRIVATE_KEY did not derive a valid address',
+      );
+    }
+
+    const callerWallet = normalizeAddress(caller.wallet_address);
+    if (callerWallet && callerWallet.toLowerCase() !== issuerWallet.toLowerCase()) {
+      throw new ForbiddenException(
+        `ISSUER_PRIVATE_KEY wallet (${issuerWallet}) does not match caller's bound wallet (${callerWallet})`,
+      );
+    }
+
+    // --- 4. ISSUER_ROLE check ----------------------------------------------
+    await this.assertIssuerRole(issuerWallet);
+
+    // --- 5. Generate PDF certificate (NO client-supplied hash) --------------
+    let pdfBuffer: Buffer;
+    try {
+      pdfBuffer = await this.pdfService.generateCertificate({
+        organization: {
+          name: organization.name,
+          code: organization.code,
+          address: organization.address,
+        },
+        student: {
+          full_name: dto.certificate_metadata.holder_full_name,
+          student_code: dto.certificate_metadata.student_code ?? null,
+        },
+        certificateCode: certCode,
+        expires_at: formatVietnamTime(dto.expires_at) ?? null,
+        metadata: {
+          program_name: dto.certificate_metadata.program_name,
+          major: dto.certificate_metadata.major ?? null,
+          degree_type: dto.certificate_metadata.degree_type ?? null,
+          classification: dto.certificate_metadata.classification ?? null,
+          gpa: dto.certificate_metadata.gpa ?? null,
+          graduation_year: dto.certificate_metadata.graduation_year ?? null,
+          issue_decision_number:
+            dto.certificate_metadata.issue_decision_number ?? null,
+          issue_date: dto.certificate_metadata.issue_date ?? null,
+        },
+      });
+    } catch (err) {
+      throw err;
+    }
+
+    // --- 6. SHA-256(PDF) -> document_hash (bytes32) -----------------------
+    const documentHashHex =
+      '0x' +
+      createHash('sha256')
+        .update(pdfBuffer)
+        .digest('hex');
+    const documentHashBytes32 = requireBytes32(documentHashHex);
+    if (!documentHashBytes32) {
+      throw new InternalServerErrorException(
+        `Computed SHA-256 did not produce a valid bytes32: ${documentHashHex}`,
+      );
+    }
+    this.logger.log(
+      `Generated PDF (${pdfBuffer.length} bytes) and document_hash=${documentHashBytes32} for ${certCode}`,
+    );
+
+    // --- 7. Pre-flight on-chain uniqueness (now we have doc hash + cid path) -
     let usedOnChain: boolean;
     try {
       usedOnChain =
@@ -1056,45 +1134,49 @@ export class CertificateService {
       throw new ConflictException('certificate_code already used on-chain');
     }
 
-    // --- 4. Pre-flight DB uniqueness ----------------------------------------
-    const inDb = await this.prisma.certificates.findFirst({
-      where: {
-        chain_id: CHAIN_ID,
-        contract_address: CERTIFICATE_MANAGER_ADDRESS,
-        certificate_code_hash: codeHashHex,
-      },
-      select: { id: true },
-    });
-    if (inDb) {
-      throw new ConflictException('certificate_code already recorded in DB');
-    }
-
-    // --- 5. Issuer wallet from ISSUER_PRIVATE_KEY ---------------------------
-    const issuerAccount = new ethers.Wallet(ISSUER_PRIVATE_KEY, this.blockchain.provider);
-    const issuerWallet = normalizeAddress(issuerAccount.address);
-    if (!issuerWallet) {
-      throw new InternalServerErrorException(
-        'ISSUER_PRIVATE_KEY did not derive a valid address',
+    // --- 8. Upload PDF to Pinata (CID_PDF -> document_uri) ------------------
+    const documentFilename = `${certCode}.pdf`;
+    let documentUri: string;
+    try {
+      documentUri = await this.pinata.uploadFile(
+        documentFilename,
+        pdfBuffer,
+        'application/pdf',
       );
+    } catch (err) {
+      // Per spec: do not send blockchain transaction if Pinata upload fails.
+      throw err;
     }
+    const documentIpfsCid = extractIpfsCid(documentUri);
 
-    // Sanity check: env wallet must match caller's bound wallet if present.
-    const callerWallet = normalizeAddress(caller.wallet_address);
-    if (callerWallet && callerWallet.toLowerCase() !== issuerWallet.toLowerCase()) {
-      throw new ForbiddenException(
-        `ISSUER_PRIVATE_KEY wallet (${issuerWallet}) does not match caller's bound wallet (${callerWallet})`,
+    // --- 9. Upload certificate_metadata JSON to Pinata (CID_METADATA) -------
+    const metadataPayload = this.buildMetadataForIpfs(
+      certCode,
+      documentHashBytes32,
+      dto,
+      organizationId,
+      caller.id,
+      holder,
+      documentUri,
+      documentIpfsCid,
+    );
+    let metadataUri: string;
+    try {
+      metadataUri = await this.pinata.uploadJson(
+        `${certCode}.metadata.json`,
+        metadataPayload,
       );
+    } catch (err) {
+      throw err;
     }
+    const metadataIpfsCid = extractIpfsCid(metadataUri);
 
-    // --- 6. ISSUER_ROLE check ----------------------------------------------
-    await this.assertIssuerRole(issuerWallet);
-
-    // --- 7. Build EIP-1559 tx skeleton -------------------------------------
+    // --- 10. Build EIP-1559 tx skeleton ------------------------------------
     const iface = this.blockchain.managerContract.interface;
     const data = iface.encodeFunctionData('issueCertificate', [
       holder.wallet_address,
       codeHashHex,
-      docHashHex,
+      documentHashBytes32,
       expiresAt,
       metadataUri,
     ]);
@@ -1124,7 +1206,7 @@ export class CertificateService {
         await this.blockchain.managerContract.issueCertificate.estimateGas(
           holder.wallet_address,
           codeHashHex,
-          docHashHex,
+          documentHashBytes32,
           expiresAt,
           metadataUri,
           { from: issuerWallet },
@@ -1146,7 +1228,7 @@ export class CertificateService {
       type: 2,
     };
 
-    // --- 8. Sign + send ----------------------------------------------------
+    // --- 11. Sign + send ---------------------------------------------------
     let txResponse: ethers.TransactionResponse;
     try {
       const signed = await issuerAccount.signTransaction(txRequest);
@@ -1157,7 +1239,7 @@ export class CertificateService {
       throw mapBlockchainError(err);
     }
 
-    // --- 9. Wait for receipt ----------------------------------------------
+    // --- 12. Wait for receipt ----------------------------------------------
     let receipt: ethers.TransactionReceipt | null;
     try {
       receipt = await this.blockchain.provider.waitForTransaction(
@@ -1181,7 +1263,7 @@ export class CertificateService {
       );
     }
 
-    // --- 10. Parse CertificateIssued ---------------------------------------
+    // --- 13. Parse CertificateIssued ---------------------------------------
     const issued = findCertificateIssuedEvent(receipt);
     if (!issued) {
       throw new InternalServerErrorException(
@@ -1194,7 +1276,7 @@ export class CertificateService {
       );
     }
 
-    // --- 11. Resolve block timestamp --------------------------------------
+    // --- 14. Resolve block timestamp --------------------------------------
     let block: ethers.Block | null;
     try {
       block = await this.blockchain.provider.getBlock(receipt.blockNumber);
@@ -1212,9 +1294,7 @@ export class CertificateService {
     const expiresAtDate =
       expiresAt === 0 ? null : new Date(expiresAt * 1000);
 
-    // --- 12. Persist (single DB transaction) ------------------------------
-    const ipfsCid = extractIpfsCid(metadataUri);
-
+    // --- 15. Persist (single DB transaction) ------------------------------
     try {
       const safeReceipt = receipt;
       const cert = await this.prisma.$transaction(async (tx) => {
@@ -1235,7 +1315,9 @@ export class CertificateService {
             expires_at: expiresAtDate,
             status: 'Active',
             metadata_uri: metadataUri,
-            metadata_ipfs_cid: ipfsCid,
+            metadata_ipfs_cid: metadataIpfsCid,
+            document_uri: documentUri,
+            document_ipfs_cid: documentIpfsCid,
           },
           select: {
             id: true,
@@ -1264,6 +1346,8 @@ export class CertificateService {
                 documentHash: issued.documentHash,
                 expiresAt: Number(issued.expiresAt),
               },
+              document_uri: documentUri,
+              metadata_uri: metadataUri,
             },
           },
         });
@@ -1273,7 +1357,9 @@ export class CertificateService {
             data: {
               certificate_id: created.id,
               ...this.mapMetadata(dto.certificate_metadata),
-              metadata_ipfs_hash: ipfsCid ?? undefined,
+              metadata_json: metadataPayload as unknown as Prisma.InputJsonValue,
+              metadata_ipfs_hash: metadataIpfsCid ?? undefined,
+              metadata_pinned_at: new Date(),
             },
           });
         }
@@ -1288,6 +1374,7 @@ export class CertificateService {
         block_number: Number(safeReceipt.blockNumber),
         block_timestamp: issuedAt,
         certificate_code: certCode,
+
         holder_user_id: holder.id,
         holder_wallet_address: issued.holder.toLowerCase(),
         organization_id: organizationId,
@@ -1295,8 +1382,14 @@ export class CertificateService {
         issuer_wallet_address: issued.issuer.toLowerCase(),
         contract_address: CERTIFICATE_MANAGER_ADDRESS,
         chain_id: CHAIN_ID,
+
         document_hash: issued.documentHash,
+        document_ipfs_cid: documentIpfsCid,
+        document_uri: toIpfsGatewayUrl(documentUri),
+
+        metadata_ipfs_cid: metadataIpfsCid,
         metadata_uri: toIpfsGatewayUrl(metadataUri),
+
         status: cert.status,
         issued_at: issuedAt,
         expires_at: expiresAtDate,
@@ -1311,7 +1404,7 @@ export class CertificateService {
         );
       }
       this.logger.error(
-        `DB write failed AFTER successful chain tx=${txResponse.hash} (tokenId=${issued.tokenId.toString()}): ${(err as Error).message}`,
+        `DB write failed AFTER successful chain tx=${txResponse.hash} (tokenId=${issued.tokenId.toString()}). document_ipfs_cid=${documentIpfsCid} metadata_ipfs_cid=${metadataIpfsCid} document_uri=${documentUri} metadata_uri=${metadataUri}: ${(err as Error).message}`,
         (err as Error).stack,
       );
       throw new InternalServerErrorException(
@@ -1796,27 +1889,32 @@ export class CertificateService {
   }
 
   /**
-   * Builds a JSON document describing the certificate and uploads it to IPFS
-   * via Pinata. Returns the `ipfs://<cid>` URI that is stored in DB and on-chain.
+   * Builds a JSON document describing the certificate. The actual upload to
+   * IPFS via Pinata happens at the call site after the PDF is uploaded, so
+   * we keep both CIDs available to include them in the canonical metadata
+   * that goes on-chain via `metadataURI`.
    */
-  private async buildAndUploadMetadata(
+  private buildMetadataForIpfs(
     certificateCode: string,
     documentHashHex: string,
     dto: IssueCertificateDto,
     organizationId: number,
     issuerUserId: number,
     holder: { id: number; wallet_address: string },
-  ): Promise<string> {
-    const metadata = {
+    documentUri: string,
+    documentIpfsCid: string | null,
+  ): Record<string, unknown> {
+    return {
       name: `Certificate ${certificateCode}`,
       description: 'Academic certificate metadata anchored on-chain',
       certificate_code: certificateCode,
       document_hash: documentHashHex,
+      document_uri: documentUri,
+      document_ipfs_cid: documentIpfsCid,
       expires_at: dto.expires_at ?? null,
       organization_id: organizationId,
       issuer: {
         user_id: issuerUserId,
-        wallet_address: '', // filled below by caller via blockchain manager if needed
       },
       holder: {
         user_id: holder.id,
@@ -1824,11 +1922,6 @@ export class CertificateService {
       },
       attributes: this.buildMetadataAttributes(dto.certificate_metadata),
     };
-    const ipfsUri = await this.pinata.uploadJson(
-      `${certificateCode}.json`,
-      metadata,
-    );
-    return ipfsUri;
   }
 
   private buildMetadataAttributes(

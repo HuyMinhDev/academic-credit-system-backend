@@ -32,10 +32,7 @@ export class PinataService implements OnModuleInit {
     }
   }
 
-  /**
-   * Upload a JSON object to IPFS via Pinata public network.
-   * Returns the IPFS URI in the form `ipfs://<cid>`.
-   */
+
   async uploadJson(
     name: string,
     data: Record<string, unknown>,
@@ -58,6 +55,35 @@ export class PinataService implements OnModuleInit {
     } catch (err) {
       throw new InternalServerErrorException(
         `Pinata upload failed: ${(err as Error).message}`,
+      );
+    }
+  }
+
+  async uploadFile(
+    filename: string,
+    buffer: Buffer,
+    mimeType = 'application/pdf',
+  ): Promise<string> {
+    if (!this.sdk) {
+      throw new InternalServerErrorException(
+        'PinataService is not configured (PINATA_JWT missing)',
+      );
+    }
+    try {
+      const blob = new Blob([new Uint8Array(buffer)], { type: mimeType });
+      const file = new File([blob], filename, { type: mimeType });
+      const result = await this.sdk.upload.public.file(file, {
+        metadata: { name: filename },
+      });
+      if (!result?.cid) {
+        throw new InternalServerErrorException(
+          'Pinata file upload returned no CID',
+        );
+      }
+      return `ipfs://${result.cid}`;
+    } catch (err) {
+      throw new InternalServerErrorException(
+        `Pinata file upload failed: ${(err as Error).message}`,
       );
     }
   }
