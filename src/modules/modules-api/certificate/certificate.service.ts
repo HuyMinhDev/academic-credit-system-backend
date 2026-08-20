@@ -180,6 +180,7 @@ export interface LookupCertificateResult {
   revocation_reason_hash: string | null;
   revocation_reason: string | null;
   metadata_uri: string;
+  document_uri: string | null;
   on_chain_issued_at: string;
   on_chain_expires_at: string;
   on_chain_revoked_at: string;
@@ -271,6 +272,7 @@ export interface VerifyCertificateResult {
   issuer_wallet_address: string;
   holder_wallet_address: string;
   metadata_uri: string;
+  document_uri: string | null;
   on_chain: {
     certificate_code_hash: string;
     document_hash: string;
@@ -314,6 +316,7 @@ export class CertificateService {
       expires_at: Date | null;
       revoked_at: Date | null;
       metadata_uri: string;
+      document_uri: string | null;
     } | null = null;
 
     if (dto.token_id) {
@@ -335,6 +338,7 @@ export class CertificateService {
           expires_at: true,
           revoked_at: true,
           metadata_uri: true,
+          document_uri: true,
         },
       });
     } else if (dto.certificate_code) {
@@ -359,6 +363,7 @@ export class CertificateService {
           expires_at: true,
           revoked_at: true,
           metadata_uri: true,
+          document_uri: true,
         },
       });
     }
@@ -380,6 +385,7 @@ export class CertificateService {
         issuer_wallet_address: '',
         holder_wallet_address: '',
         metadata_uri: '',
+        document_uri: null,
         on_chain: {
           certificate_code_hash: '',
           document_hash: '',
@@ -496,6 +502,7 @@ export class CertificateService {
       issuer_wallet_address: cert.issuer_wallet_address,
       holder_wallet_address: cert.holder_wallet_address,
       metadata_uri: toIpfsGatewayUrl(cert.metadata_uri),
+      document_uri: cert.document_uri ? toIpfsGatewayUrl(cert.document_uri) : null,
       on_chain: {
         certificate_code_hash: onChain.certificateCodeHash,
         document_hash: onChain.documentHash,
@@ -597,6 +604,7 @@ export class CertificateService {
       revocation_reason_hash: cert.revocation_reason_hash ?? null,
       revocation_reason: latestRevokedEvent?.reason ?? null,
       metadata_uri: toIpfsGatewayUrl(cert.metadata_uri),
+      document_uri: cert.document_uri ? toIpfsGatewayUrl(cert.document_uri) : null,
       on_chain_issued_at: onChainCert.issuedAt.toString(),
       on_chain_expires_at: onChainCert.expiresAt.toString(),
       on_chain_revoked_at: onChainCert.revokedAt.toString(),
