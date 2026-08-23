@@ -32,6 +32,19 @@ export class HistoryCertificateDto {
 
   @ApiPropertyOptional({
     description:
+      'Partial match on certificate_code (case-insensitive). When set in scope mode (no token_id/certificate_code provided), filters certificates by code substring. Combined with org/holder scope filters — pure DB search, no blockchain calls.',
+    example: 'HUST-2026',
+    minLength: 1,
+    maxLength: 100,
+  })
+  @IsOptional()
+  @IsString()
+  @MinLength(1)
+  @MaxLength(100)
+  keyword?: string;
+
+  @ApiPropertyOptional({
+    description:
       'On-chain token id (uint256 as string). Provide either token_id or certificate_code to scope history to a single certificate. Omit BOTH to list history for all certificates in the caller\'s organization.',
     example: '1',
   })

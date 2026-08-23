@@ -58,7 +58,7 @@ export class CertificateController {
   @HttpCode(HttpStatus.OK)
   @ApiOperation({
     summary:
-      'Get the on-chain issue/revoke history. Two modes: (1) provide token_id or certificate_code to scope history to a single certificate; (2) omit both to list history across all certificates in the caller\'s organization (school_admin), owned by the caller (student), or globally (super_admin). Optional ?type=Issued|Revoked filter. Pagination: ?page=1&limit=20.',
+      'Get the issue/revoke history (DB only, no blockchain calls). Two modes: (1) provide token_id or certificate_code to scope history to a single certificate; (2) omit both to list history across all certificates in the caller\'s organization (school_admin), owned by the caller (student), or globally (super_admin). Optional filters: ?type=Issued|Revoked, ?keyword=<substring of certificate_code>. Pagination: ?page=1&limit=20.',
   })
   async history(
     @Query() dto: HistoryCertificateDto,

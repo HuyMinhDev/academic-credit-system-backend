@@ -24,6 +24,7 @@ const SAFE_USER_SELECT = {
   avatar: true,
   organization_id: true,
   wallet_address: true,
+  user_code: true,
   created_at: true,
   updated_at: true,
 } as const;

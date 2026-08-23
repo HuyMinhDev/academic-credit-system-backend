@@ -24,6 +24,7 @@ model users {
   deleted_at                                                      DateTime?            @db.Timestamptz(6)
   created_at                                                      DateTime             @default(now()) @db.Timestamptz(6)
   updated_at                                                      DateTime             @default(now()) @db.Timestamptz(6)
+  user_code                                                       String?              @db.VarChar(100)
   certificate_events                                              certificate_events[]
   certificates_certificates_holder_user_id_organization_idTousers certificates[]       @relation("certificates_holder_user_id_organization_idTousers")
   certificates_certificates_issuer_user_id_organization_idTousers certificates[]       @relation("certificates_issuer_user_id_organization_idTousers")
@@ -67,10 +68,10 @@ model certificates {
   replacement_token_id                                               BigInt?
   metadata_uri                                                       String                @db.VarChar(500)
   metadata_ipfs_cid                                                  String?               @db.VarChar(100)
-  document_uri                                                       String?               @db.VarChar(500)
-  document_ipfs_cid                                                  String?               @db.VarChar(100)
   created_at                                                         DateTime              @default(now()) @db.Timestamptz(6)
   updated_at                                                         DateTime              @default(now()) @db.Timestamptz(6)
+  document_ipfs_cid                                                  String?               @db.VarChar(100)
+  document_uri                                                       String?               @db.VarChar(500)
   certificate_events                                                 certificate_events[]
   certificate_metadata                                               certificate_metadata?
   organizations                                                      organizations         @relation(fields: [organization_id], references: [id], onDelete: NoAction, onUpdate: NoAction)

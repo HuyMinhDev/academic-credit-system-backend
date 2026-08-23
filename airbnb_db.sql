@@ -563,3 +563,6 @@ SET organization_id = 2
 WHERE id = 4
   AND role = 'student'
   AND is_deleted = false;
+
+ALTER TABLE users
+ADD COLUMN IF NOT EXISTS user_code VARCHAR(100);

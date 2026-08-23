@@ -201,6 +201,7 @@ export interface LookupCertificateResult {
 }
 
 export interface CertificateHistoryEvent {
+  event_id: string;
   certificate_id?: number;
   certificate_code?: string;
   event_type: CertificateHistoryEventType;
@@ -215,16 +216,23 @@ export interface CertificateHistoryEvent {
   reason: string | null;
   payload: Prisma.JsonValue;
   indexed_at: Date;
+  issue_date: Date | null;
+  expires_at: Date | null;
+  revoked_at: Date | null;
 }
 
 export interface CertificateHistoryResult {
   scope: 'certificate';
-  certificate_id: number;
-  token_id: string;
-  certificate_code: string;
-  organization_id: number;
-  issuer_user_id: number;
-  holder_user_id: number;
+  not_found?: boolean;
+  certificate_id: number | null;
+  token_id: string | null;
+  certificate_code: string | null;
+  organization_id: number | null;
+  issuer_user_id: number | null;
+  holder_user_id: number | null;
+  issue_date: Date | null;
+  expires_at: Date | null;
+  revoked_at: Date | null;
   total_issued: number;
   total_revoked: number;
   events: CertificateHistoryEvent[];
@@ -658,6 +666,9 @@ export class CertificateService {
       organization_id: number;
       issuer_user_id: number;
       holder_user_id: number;
+      expires_at: Date | null;
+      revoked_at: Date | null;
+      certificate_metadata: { issue_date: Date | null } | null;
     } | null = null;
 
     if (dto.token_id) {
@@ -674,6 +685,9 @@ export class CertificateService {
           organization_id: true,
           issuer_user_id: true,
           holder_user_id: true,
+          expires_at: true,
+          revoked_at: true,
+          certificate_metadata: { select: { issue_date: true } },
         },
       });
     } else if (dto.certificate_code) {
@@ -693,16 +707,36 @@ export class CertificateService {
           organization_id: true,
           issuer_user_id: true,
           holder_user_id: true,
+          expires_at: true,
+          revoked_at: true,
+          certificate_metadata: { select: { issue_date: true } },
         },
       });
     }
 
     if (!cert) {
-      throw new NotFoundException(
-        dto.certificate_code
-          ? `Certificate with code '${dto.certificate_code}' not found`
-          : `Certificate with token_id '${dto.token_id}' not found`,
-      );
+      return {
+        scope: 'certificate',
+        not_found: true,
+        certificate_id: null,
+        token_id: dto.token_id ?? null,
+        certificate_code: dto.certificate_code ?? null,
+        organization_id: null,
+        issuer_user_id: null,
+        holder_user_id: null,
+        issue_date: null,
+        expires_at: null,
+        revoked_at: null,
+        total_issued: 0,
+        total_revoked: 0,
+        events: [],
+        pagination: {
+          page: dto.page,
+          limit: dto.limit,
+          total: 0,
+          total_pages: 0,
+        },
+      };
     }
 
     // --- 2. Authorization (single cert) -----------------------------------
@@ -742,6 +776,9 @@ export class CertificateService {
       organization_id: cert.organization_id,
       issuer_user_id: cert.issuer_user_id,
       holder_user_id: cert.holder_user_id,
+      issue_date: cert.certificate_metadata?.issue_date ?? null,
+      expires_at: cert.expires_at,
+      revoked_at: cert.revoked_at,
       total_issued: totalIssued,
       total_revoked: totalRevoked,
       events,
@@ -790,10 +827,15 @@ export class CertificateService {
     if (holderUserId !== null) {
       certWhere.holder_user_id = holderUserId;
     }
+    if (dto.keyword && typeof dto.keyword === 'string') {
+      certWhere.OR = [
+        { certificate_code: { contains: dto.keyword, mode: 'insensitive' } },
+      ];
+    }
 
     const certIds = await this.prisma.certificates.findMany({
       where: certWhere,
-      select: { id: true },
+      select: { id: true, certificate_code: true },
     });
     const certIdList = certIds.map((c) => c.id);
 
@@ -852,8 +894,16 @@ export class CertificateService {
         skip,
         take: dto.limit,
         select: {
+          id: true,
           certificate_id: true,
-          certificates: { select: { certificate_code: true } },
+          certificates: {
+            select: {
+              certificate_code: true,
+              expires_at: true,
+              revoked_at: true,
+              certificate_metadata: { select: { issue_date: true } },
+            },
+          },
           event_type: true,
           tx_hash: true,
           block_number: true,
@@ -872,6 +922,7 @@ export class CertificateService {
     ]);
 
     const events: CertificateHistoryEvent[] = eventsRaw.map((e) => ({
+      event_id: e.id.toString(),
       certificate_id: e.certificate_id ?? undefined,
       certificate_code: e.certificates?.certificate_code,
       event_type: e.event_type as CertificateHistoryEventType,
@@ -886,6 +937,9 @@ export class CertificateService {
       reason: e.reason,
       payload: e.payload,
       indexed_at: e.indexed_at,
+      issue_date: e.certificates?.certificate_metadata?.issue_date ?? null,
+      expires_at: e.certificates?.expires_at ?? null,
+      revoked_at: e.certificates?.revoked_at ?? null,
     }));
 
     return {
@@ -968,6 +1022,7 @@ export class CertificateService {
         skip,
         take: limit,
         select: {
+          id: true,
           event_type: true,
           tx_hash: true,
           block_number: true,
@@ -980,12 +1035,20 @@ export class CertificateService {
           reason: true,
           payload: true,
           indexed_at: true,
+          certificates: {
+            select: {
+              expires_at: true,
+              revoked_at: true,
+              certificate_metadata: { select: { issue_date: true } },
+            },
+          },
         },
       }),
       this.prisma.certificate_events.count({ where }),
     ]);
 
     const events: CertificateHistoryEvent[] = eventsRaw.map((e) => ({
+      event_id: e.id.toString(),
       event_type: e.event_type as CertificateHistoryEventType,
       tx_hash: e.tx_hash,
       block_number: e.block_number.toString(),
@@ -998,6 +1061,9 @@ export class CertificateService {
       reason: e.reason,
       payload: e.payload,
       indexed_at: e.indexed_at,
+      issue_date: e.certificates?.certificate_metadata?.issue_date ?? null,
+      expires_at: e.certificates?.expires_at ?? null,
+      revoked_at: e.certificates?.revoked_at ?? null,
     }));
 
     return { events, total };
