@@ -327,65 +327,38 @@ export class CertificateService {
       document_uri: string | null;
     } | null = null;
 
-    if (dto.token_id) {
-      cert = await this.prisma.certificates.findFirst({
-        where: {
-          chain_id: CHAIN_ID,
-          contract_address: CERTIFICATE_MANAGER_ADDRESS,
-          token_id: BigInt(dto.token_id),
-        },
-        select: {
-          id: true,
-          token_id: true,
-          certificate_code: true,
-          certificate_code_hash: true,
-          document_hash: true,
-          holder_wallet_address: true,
-          issuer_wallet_address: true,
-          issued_at: true,
-          expires_at: true,
-          revoked_at: true,
-          metadata_uri: true,
-          document_uri: true,
-        },
-      });
-    } else if (dto.certificate_code) {
-      const codeHashHex = ethers.keccak256(
-        ethers.toUtf8Bytes(dto.certificate_code),
-      );
-      cert = await this.prisma.certificates.findFirst({
-        where: {
-          chain_id: CHAIN_ID,
-          contract_address: CERTIFICATE_MANAGER_ADDRESS,
-          certificate_code_hash: codeHashHex,
-        },
-        select: {
-          id: true,
-          token_id: true,
-          certificate_code: true,
-          certificate_code_hash: true,
-          document_hash: true,
-          holder_wallet_address: true,
-          issuer_wallet_address: true,
-          issued_at: true,
-          expires_at: true,
-          revoked_at: true,
-          metadata_uri: true,
-          document_uri: true,
-        },
-      });
-    }
+    const codeHashHex = ethers.keccak256(
+      ethers.toUtf8Bytes(dto.certificate_code),
+    );
+    cert = await this.prisma.certificates.findFirst({
+      where: {
+        chain_id: CHAIN_ID,
+        contract_address: CERTIFICATE_MANAGER_ADDRESS,
+        certificate_code_hash: codeHashHex,
+      },
+      select: {
+        id: true,
+        token_id: true,
+        certificate_code: true,
+        certificate_code_hash: true,
+        document_hash: true,
+        holder_wallet_address: true,
+        issuer_wallet_address: true,
+        issued_at: true,
+        expires_at: true,
+        revoked_at: true,
+        metadata_uri: true,
+        document_uri: true,
+      },
+    });
 
     if (!cert) {
       return {
         is_valid: false,
         status: 'NOT_FOUND',
-        reason:
-          dto.certificate_code
-            ? `Certificate with code '${dto.certificate_code}' not found`
-            : `Certificate with token_id '${dto.token_id}' not found`,
-        certificate_code: dto.certificate_code ?? '',
-        token_id: dto.token_id ?? '',
+        reason: `Certificate with code '${dto.certificate_code}' not found`,
+        certificate_code: dto.certificate_code,
+        token_id: '',
         issued_at: verifiedAt,
         expires_at: null,
         revoked_at: null,

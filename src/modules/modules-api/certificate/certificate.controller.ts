@@ -47,7 +47,7 @@ export class CertificateController {
   @HttpCode(HttpStatus.OK)
   @ApiOperation({
     summary:
-      'Verify whether a certificate is still valid. Accepts either certificate_code or token_id. Compares DB against on-chain state.',
+      'Verify whether a certificate is still valid by certificate_code. Resolves token_id from the database and compares DB against on-chain state.',
   })
   async verify(@Body() dto: VerifyCertificateDto) {
     const result = await this.service.verify(dto);
