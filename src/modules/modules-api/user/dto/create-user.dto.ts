@@ -21,6 +21,18 @@ export class CreateUserDto {
   @Transform(({ value }) => (typeof value === 'string' ? value.trim() : value))
   name: string;
 
+  @ApiProperty({
+    example: 'SV001',
+    required: false,
+    maxLength: 100,
+    description: 'Mã người dùng trong tổ chức.',
+  })
+  @IsOptional()
+  @IsString()
+  @MaxLength(100)
+  @Transform(({ value }) => (typeof value === 'string' ? value.trim() : value))
+  user_code?: string;
+
   @ApiProperty({ example: 'user@example.com', maxLength: 255 })
   @IsEmail()
   @MaxLength(255)

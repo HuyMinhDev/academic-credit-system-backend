@@ -50,7 +50,8 @@ export class UserController {
   })
   async create(
     @Body() createUserDto: CreateUserDto,
-    @Req() req: {
+    @Req()
+    req: {
       user: {
         id: number;
         role: UserRole;
@@ -78,13 +79,7 @@ export class UserController {
   @ApiQuery({
     name: 'role',
     required: false,
-    enum: [
-      'super_admin',
-      'school_admin',
-      'issuer',
-      'student',
-      'verifier',
-    ],
+    enum: ['super_admin', 'school_admin', 'issuer', 'student', 'verifier'],
     description: 'Lọc theo role',
   })
   @ApiResponse({
@@ -93,7 +88,8 @@ export class UserController {
   })
   async findAll(
     @Query() query: QueryUserDto,
-    @Req() req: {
+    @Req()
+    req: {
       user: {
         id: number;
         role: UserRole;
